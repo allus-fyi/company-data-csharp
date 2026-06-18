@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Allus.CompanyData/Allus.CompanyData.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Allus.CompanyData.Tests/Allus.CompanyData.Tests.csproj" />
+  </Folder>
+</Solution>

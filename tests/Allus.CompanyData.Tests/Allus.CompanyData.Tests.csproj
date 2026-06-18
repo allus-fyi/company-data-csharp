@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <!-- net8.0 is the target, but only the .NET 10 runtime is installed here; roll forward so the
+         test host runs on it. (The shipped library targets net8.0 for broad LTS reach.) -->
+    <RollForward>Major</RollForward>
+    <!-- The shared test vector lives at sdks/testdata; surface its path to tests. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.23" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Allus.CompanyData/Allus.CompanyData.csproj" />
+  </ItemGroup>
+
+</Project>

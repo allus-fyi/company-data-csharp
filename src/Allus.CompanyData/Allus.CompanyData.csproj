@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The allus company-data SDK (C# / .NET).
+    A NuGet class library: `dotnet add package Allus.CompanyData`, namespace
+    `Allus.CompanyData`. Targets net8.0 (broad LTS reach) while built with the
+    dotnet 10 SDK. Pure BCL crypto (System.Security.Cryptography) — no third-party
+    dependencies.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- XML-doc warnings are noise for a small surface; keep the build clean. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <!-- NuGet package metadata. `dotnet pack` produces the .nupkg. -->
+  <PropertyGroup>
+    <PackageId>Allus.CompanyData</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>allus</Authors>
+    <Company>allme.fyi</Company>
+    <Product>allus company-data SDK</Product>
+    <Description>The allus company-data SDK for .NET — point it at a JSON config and get typed, plaintext, your-slug-keyed conclusions for each connected person, with transparent hybrid decryption, a crash-safe changes pump, and webhook receiver helpers.</Description>
+    <PackageTags>allus;allme;company-data;sdk;e2ee;decryption;webhooks</PackageTags>
+    <PackageProjectUrl>https://github.com/allus/company-data-csharp</PackageProjectUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/allus/company-data-csharp.git</RepositoryUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="\" Condition="Exists('../../README.md')" />
+  </ItemGroup>
+
+</Project>
