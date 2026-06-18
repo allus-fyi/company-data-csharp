@@ -28,10 +28,10 @@
     <Product>allus company-data SDK</Product>
     <Description>The allus company-data SDK for .NET — point it at a JSON config and get typed, plaintext, your-slug-keyed conclusions for each connected person, with transparent hybrid decryption, a crash-safe changes pump, and webhook receiver helpers.</Description>
     <PackageTags>allus;allme;company-data;sdk;e2ee;decryption;webhooks</PackageTags>
-    <PackageProjectUrl>https://github.com/allus/company-data-csharp</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/allus-fyi/company-data-csharp</PackageProjectUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryType>git</RepositoryType>
-    <RepositoryUrl>https://github.com/allus/company-data-csharp.git</RepositoryUrl>
+    <RepositoryUrl>https://github.com/allus-fyi/company-data-csharp.git</RepositoryUrl>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <PackageReadmeFile>README.md</PackageReadmeFile>
