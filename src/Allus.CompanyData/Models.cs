@@ -7,7 +7,7 @@
 //   RequestField { Slug, Label, Type, OneTime, Mandatory }   // YOUR request config
 //   Connection   { Id, PersonId, DisplayName, ConnectedAt, Values: {<slug>: Value} }
 //   Value        { ValueObj, Live, UpdatedAt }
-//   Change       { Id, Event, PersonId, Slug?, Value?, Live?, At }   // Id = stable dedup key
+//   Change       { Id, Event, PersonId, ShareCode?, Slug?, Value?, Live?, At }   // Id = stable dedup key
 //   LogEntry     { Type, Message, Metadata, At }
 //
 // Typed values:
@@ -245,6 +245,7 @@ public sealed record Change(
     string? Id,
     string? Event,
     string? PersonId,
+    string? ShareCode = null,   // the person's profile share code (every event; may be null)
     string? Slug = null,
     object? ValueObj = null,
     bool? Live = null,
@@ -275,6 +276,7 @@ public sealed record Change(
             Id: obj.Get("id").AsString(),
             Event: ev,
             PersonId: obj.Get("person_user_id").AsString() ?? obj.Get("person_id").AsString(),
+            ShareCode: obj.Get("share_code").AsString(),
             Slug: slug,
             ValueObj: value,
             Live: live,
