@@ -276,4 +276,31 @@ public class ModelTests
         Assert.NotNull(logs[0].At);
         Assert.NotNull(logs[1].At); // 'created_at' fallback for 'at'
     }
+
+    [Fact]
+    public void ChangeIncludesShareCode()
+    {
+        // Every change event carries the person's profile share_code (nullable).
+        using var key = Vector.PrivateKey();
+        var body = Obj(new()
+        {
+            ["changes"] = Node.List(new List<Node>
+            {
+                Obj(new()
+                {
+                    ["id"] = S("chg-1"), ["event"] = S("connection_created"),
+                    ["person_user_id"] = S("person-1"), ["share_code"] = S("ABC123"),
+                    ["at"] = S("2026-06-17T12:00:00Z"),
+                }),
+                Obj(new()
+                {
+                    ["id"] = S("chg-2"), ["event"] = S("connection_created"),
+                    ["person_user_id"] = S("person-2"), ["at"] = S("2026-06-17T12:00:00Z"), // no share_code -> null
+                }),
+            }),
+        });
+        var changes = Change.ListFromApi(body, _ => null, DecryptWith(key));
+        Assert.Equal("ABC123", changes[0].ShareCode);
+        Assert.Null(changes[1].ShareCode);
+    }
 }
