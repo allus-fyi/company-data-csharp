@@ -49,15 +49,52 @@ public static class Webhooks
     // ── verify ───────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Verify the <c>X-Allus-Signature</c> HMAC over the raw body. Reads
-    /// <c>X-Allus-Webhook-Id</c>, looks up that webhook's HMAC secret in config (falling back to
-    /// the single-webhook shortcut), recomputes <c>HMAC-SHA256(rawBody, secret)</c> as hex, and
-    /// constant-time-compares it (<see cref="CryptographicOperations.FixedTimeEquals"/>) to the
-    /// header. Returns <c>false</c> on a missing signature, unknown/unconfigured webhook id, or
-    /// mismatch — never throws for a bad signature (that is <see cref="HandleWebhook"/>'s job).
+    /// Verify a webhook against the SINGLE configured auth method, mirroring the platform's
+    /// per-webhook delivery auth (one method per webhook):
+    /// <list type="bullet">
+    /// <item><c>hmac</c>   — recompute <c>HMAC-SHA256(rawBody, secret)</c> (secret selected by
+    /// <c>X-Allus-Webhook-Id</c>) and constant-time-compare to <c>X-Allus-Signature</c>.</item>
+    /// <item><c>bearer</c> — <c>Authorization</c> equals <c>Bearer &lt;token&gt;</c>.</item>
+    /// <item><c>basic</c>  — <c>Authorization</c> equals <c>Basic &lt;base64(user:pass)&gt;</c>.</item>
+    /// <item><c>header</c> — the configured custom header equals the configured value.</item>
+    /// <item><c>none</c>   — always <c>true</c> (explicit opt-out).</item>
+    /// </list>
+    /// All comparisons are constant-time (<see cref="CryptographicOperations.FixedTimeEquals"/>).
+    /// Returns <c>false</c> on a missing/mismatched credential, or when no method is configured —
+    /// never throws for a bad credential (that is <see cref="HandleWebhook"/>'s job). Which method
+    /// is used is decided entirely by config (<see cref="Config.WebhookAuthMethod"/>); config
+    /// loading guarantees at most one is set.
     /// </summary>
     public static bool VerifyWebhook(object rawBody, IReadOnlyDictionary<string, string>? headers, Config config)
     {
+        var method = config.WebhookAuthMethod();
+        if (method is null) return false;
+        if (method == "none") return true;
+
+        if (method == "bearer")
+        {
+            var got = Header(headers, "authorization");
+            if (got is null) return false;
+            return FixedTimeStringEquals(got, "Bearer " + (config.WebhookBearerToken ?? ""));
+        }
+
+        if (method == "basic")
+        {
+            var got = Header(headers, "authorization");
+            if (got is null) return false;
+            var creds = $"{config.WebhookBasic!.Username}:{config.WebhookBasic.Password}";
+            var token = Convert.ToBase64String(Encoding.UTF8.GetBytes(creds));
+            return FixedTimeStringEquals(got, "Basic " + token);
+        }
+
+        if (method == "header")
+        {
+            var got = Header(headers, config.WebhookHeader!.Name);
+            if (got is null) return false;
+            return FixedTimeStringEquals(got, config.WebhookHeader.Value);
+        }
+
+        // method == "hmac"
         var body = AsBytes(rawBody);
         var signature = Header(headers, HdrSignature);
         if (string.IsNullOrEmpty(signature)) return false;
@@ -70,11 +107,16 @@ public static class Webhooks
         var expected = Convert.ToHexString(
             HMACSHA256.HashData(Encoding.UTF8.GetBytes(secret), body)).ToLowerInvariant();
         // Tolerate an uppercased signature (the platform sends lowercase hex). Constant-time compare.
-        var got = signature.Trim().ToLowerInvariant();
-        if (expected.Length != got.Length) return false;
+        var got2 = signature.Trim().ToLowerInvariant();
+        if (expected.Length != got2.Length) return false;
         return CryptographicOperations.FixedTimeEquals(
-            Encoding.ASCII.GetBytes(expected), Encoding.ASCII.GetBytes(got));
+            Encoding.ASCII.GetBytes(expected), Encoding.ASCII.GetBytes(got2));
     }
+
+    // Constant-time string compare (UTF-8 bytes). Different lengths return false; FixedTimeEquals
+    // is the timing-safe primitive (mirrors Python's hmac.compare_digest for the alt-auth methods).
+    private static bool FixedTimeStringEquals(string a, string b) =>
+        CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
 
     // ── parse ────────────────────────────────────────────────────────────────────────────────
 

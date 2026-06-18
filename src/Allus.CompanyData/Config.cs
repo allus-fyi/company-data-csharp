@@ -10,6 +10,12 @@ using System.Text.Json;
 
 namespace Allus.CompanyData;
 
+/// <summary>HTTP-Basic webhook credentials (<c>"webhook_basic"</c>).</summary>
+public sealed record WebhookBasicAuth(string Username, string Password);
+
+/// <summary>A custom-header webhook credential (<c>"webhook_header"</c>).</summary>
+public sealed record WebhookHeaderAuth(string Name, string Value);
+
 /// <summary>
 /// The whole SDK configuration. Keys live here and nowhere else.
 /// </summary>
@@ -66,6 +72,24 @@ public sealed class Config
     /// </summary>
     public IReadOnlyDictionary<string, string> Webhooks { get; init; } =
         new Dictionary<string, string>();
+
+    /// <summary>
+    /// OPTIONAL — alternative webhook auth methods, mirroring the platform's per-webhook delivery
+    /// auth. Configure AT MOST ONE family among
+    /// hmac (<see cref="Webhooks"/>/<c>webhook_secret</c>) | bearer | basic | header | none;
+    /// two or more → <see cref="ConfigException"/>. See <see cref="WebhookAuthMethod"/>.
+    /// <c>"Authorization: Bearer &lt;token&gt;"</c>.
+    /// </summary>
+    public string? WebhookBearerToken { get; init; }
+
+    /// <summary>OPTIONAL — <c>{"username","password"}</c> → HTTP-Basic <c>Authorization</c> auth.</summary>
+    public WebhookBasicAuth? WebhookBasic { get; init; }
+
+    /// <summary>OPTIONAL — <c>{"name","value"}</c> → a custom-header credential.</summary>
+    public WebhookHeaderAuth? WebhookHeader { get; init; }
+
+    /// <summary>OPTIONAL — explicit opt-out: verify is always <c>true</c>.</summary>
+    public bool WebhookAuthNone { get; init; }
 
     /// <summary>Durable local buffer dir for the changes pump.</summary>
     public string CacheDir { get; init; } = "./allus-cache";
@@ -158,6 +182,55 @@ public sealed class Config
         if (flatSecret is not null)
             webhooks[SingleWebhookKey] = flatSecret;
 
+        // Alternative webhook auth methods (file-config only — no env overrides). Validate shapes.
+        string? bearer = null;
+        if (data is { } d4 && d4.TryGetProperty("webhook_bearer_token", out var bp)
+            && bp.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
+        {
+            var s = bp.ValueKind == JsonValueKind.String ? bp.GetString() : bp.GetRawText();
+            if (!string.IsNullOrEmpty(s)) bearer = s;
+        }
+
+        WebhookBasicAuth? basicAuth = null;
+        if (data is { } d5 && d5.TryGetProperty("webhook_basic", out var basicProp)
+            && basicProp.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
+        {
+            var username = ObjString(basicProp, "username");
+            var password = ObjString(basicProp, "password");
+            if (basicProp.ValueKind != JsonValueKind.Object
+                || string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
+                throw new ConfigException(
+                    "\"webhook_basic\" must be an object with non-empty \"username\" and \"password\"");
+            basicAuth = new WebhookBasicAuth(username!, password!);
+        }
+
+        WebhookHeaderAuth? headerAuth = null;
+        if (data is { } d6 && d6.TryGetProperty("webhook_header", out var hdrProp)
+            && hdrProp.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
+        {
+            var name = ObjString(hdrProp, "name");
+            var value = ObjString(hdrProp, "value");
+            if (hdrProp.ValueKind != JsonValueKind.Object
+                || string.IsNullOrEmpty(name) || string.IsNullOrEmpty(value))
+                throw new ConfigException(
+                    "\"webhook_header\" must be an object with non-empty \"name\" and \"value\"");
+            headerAuth = new WebhookHeaderAuth(name!, value!);
+        }
+
+        var authNone = data is { } d7 && d7.TryGetProperty("webhook_auth_none", out var noneProp)
+            && noneProp.ValueKind == JsonValueKind.True;
+
+        // At most one webhook auth FAMILY may be configured (multiple HMAC entries is still one).
+        var present = new List<string>();
+        if (webhooks.Count > 0) present.Add("hmac");
+        if (bearer is not null) present.Add("bearer");
+        if (basicAuth is not null) present.Add("basic");
+        if (headerAuth is not null) present.Add("header");
+        if (authNone) present.Add("none");
+        if (present.Count > 1)
+            throw new ConfigException(
+                "configure at most one webhook auth method (found: " + string.Join(", ", present) + ")");
+
         // Required fields (fail fast).
         var required = new[]
         {
@@ -186,9 +259,23 @@ public sealed class Config
             AccountPrivateKey = values.GetValueOrDefault(nameof(AccountPrivateKey)),
             AccountPassphrase = values.GetValueOrDefault(nameof(AccountPassphrase)),
             Webhooks = webhooks,
+            WebhookBearerToken = bearer,
+            WebhookBasic = basicAuth,
+            WebhookHeader = headerAuth,
+            WebhookAuthNone = authNone,
             CacheDir = values.GetValueOrDefault(nameof(CacheDir), "./allus-cache"),
             Format = format,
         };
+    }
+
+    // Read a string sub-field from a JSON object (any non-string scalar is stringified, matching
+    // Python's str() coercion); null/missing/non-object yields null.
+    private static string? ObjString(JsonElement obj, string name)
+    {
+        if (obj.ValueKind != JsonValueKind.Object) return null;
+        if (!obj.TryGetProperty(name, out var prop)) return null;
+        if (prop.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return null;
+        return prop.ValueKind == JsonValueKind.String ? prop.GetString() : prop.GetRawText();
     }
 
     /// <summary>
@@ -201,6 +288,22 @@ public sealed class Config
         if (webhookId is not null && Webhooks.TryGetValue(webhookId, out var byId))
             return byId;
         return Webhooks.TryGetValue(SingleWebhookKey, out var flat) ? flat : null;
+    }
+
+    /// <summary>
+    /// The single configured webhook auth method, or <c>null</c> if none is set. Returns one of
+    /// <c>"hmac"</c> | <c>"bearer"</c> | <c>"basic"</c> | <c>"header"</c> | <c>"none"</c>. Config
+    /// loading guarantees at most one is configured, so the order here is only a tie-break that
+    /// never triggers.
+    /// </summary>
+    public string? WebhookAuthMethod()
+    {
+        if (WebhookAuthNone) return "none";
+        if (!string.IsNullOrEmpty(WebhookBearerToken)) return "bearer";
+        if (WebhookBasic is not null) return "basic";
+        if (WebhookHeader is not null) return "header";
+        if (Webhooks.Count > 0) return "hmac";
+        return null;
     }
 
     // Map a C# property name to its snake_case JSON/env key (the source-of-truth for messages).

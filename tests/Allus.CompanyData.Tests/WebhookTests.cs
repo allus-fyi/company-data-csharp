@@ -346,4 +346,164 @@ public sealed class WebhookTests : IDisposable
         Assert.Equal(Vector.TextPlaintext, change.ValueObj);
         accountPub.Dispose();
     }
+
+    // ── alternative webhook auth methods (bearer / basic / header / none) ────────────────────────
+
+    // Minimal Config carrying one alt-auth field (verify never reads the PEM here).
+    private static Config AuthCfg(
+        string? bearer = null,
+        WebhookBasicAuth? basic = null,
+        WebhookHeaderAuth? header = null,
+        bool none = false) => new()
+    {
+        ApiUrl = "https://api.allme.fyi",
+        ClientId = "svc",
+        ClientSecret = "s",
+        ServicePrivateKey = "unused.pem",
+        KeyPassphrase = "unused",
+        WebhookBearerToken = bearer,
+        WebhookBasic = basic,
+        WebhookHeader = header,
+        WebhookAuthNone = none,
+    };
+
+    // Build a config from a JSON object exactly as the platform's config loader would (Config._build
+    // in Python). FromFile → Build runs the same parsing + validation, so this mirrors _build(data).
+    private string FullData(Action<Dictionary<string, object?>> extra)
+    {
+        var pem = Path.Combine(_dir, "k-auth.pem");
+        File.WriteAllText(pem, Vector.EncryptedPem);
+        var data = new Dictionary<string, object?>
+        {
+            ["api_url"] = "https://api.allme.fyi",
+            ["client_id"] = "svc",
+            ["client_secret"] = "s",
+            ["service_private_key"] = pem,
+            ["key_passphrase"] = Vector.Passphrase,
+        };
+        extra(data);
+        var p = Path.Combine(_dir, "config-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(p, System.Text.Json.JsonSerializer.Serialize(data));
+        return p;
+    }
+
+    [Fact]
+    public void VerifyBearerTrue()
+    {
+        var cfg = AuthCfg(bearer: "tok123");
+        Assert.True(Webhooks.VerifyWebhook(
+            Encoding.UTF8.GetBytes("{}"),
+            new Dictionary<string, string> { ["Authorization"] = "Bearer tok123" }, cfg));
+    }
+
+    [Fact]
+    public void VerifyBearerFalseWrongToken()
+    {
+        var cfg = AuthCfg(bearer: "tok123");
+        Assert.False(Webhooks.VerifyWebhook(
+            Encoding.UTF8.GetBytes("{}"),
+            new Dictionary<string, string> { ["Authorization"] = "Bearer nope" }, cfg));
+    }
+
+    [Fact]
+    public void VerifyBearerFalseMissingHeader()
+    {
+        var cfg = AuthCfg(bearer: "tok123");
+        Assert.False(Webhooks.VerifyWebhook(
+            Encoding.UTF8.GetBytes("{}"), new Dictionary<string, string>(), cfg));
+    }
+
+    [Fact]
+    public void VerifyBasicTrue()
+    {
+        var cfg = AuthCfg(basic: new WebhookBasicAuth("u", "p"));
+        var token = Convert.ToBase64String(Encoding.UTF8.GetBytes("u:p"));
+        Assert.True(Webhooks.VerifyWebhook(
+            Encoding.UTF8.GetBytes("{}"),
+            new Dictionary<string, string> { ["Authorization"] = "Basic " + token }, cfg));
+    }
+
+    [Fact]
+    public void VerifyBasicFalseWrongPassword()
+    {
+        var cfg = AuthCfg(basic: new WebhookBasicAuth("u", "p"));
+        var bad = Convert.ToBase64String(Encoding.UTF8.GetBytes("u:wrong"));
+        Assert.False(Webhooks.VerifyWebhook(
+            Encoding.UTF8.GetBytes("{}"),
+            new Dictionary<string, string> { ["Authorization"] = "Basic " + bad }, cfg));
+    }
+
+    [Fact]
+    public void VerifyHeaderTrueCaseInsensitiveName()
+    {
+        var cfg = AuthCfg(header: new WebhookHeaderAuth("X-My-Auth", "sekret"));
+        Assert.True(Webhooks.VerifyWebhook(
+            Encoding.UTF8.GetBytes("{}"),
+            new Dictionary<string, string> { ["x-my-auth"] = "sekret" }, cfg));
+    }
+
+    [Fact]
+    public void VerifyHeaderFalseWrongValue()
+    {
+        var cfg = AuthCfg(header: new WebhookHeaderAuth("X-My-Auth", "sekret"));
+        Assert.False(Webhooks.VerifyWebhook(
+            Encoding.UTF8.GetBytes("{}"),
+            new Dictionary<string, string> { ["X-My-Auth"] = "nope" }, cfg));
+    }
+
+    [Fact]
+    public void VerifyNoneAlwaysTrue()
+    {
+        var cfg = AuthCfg(none: true);
+        Assert.True(Webhooks.VerifyWebhook(
+            Encoding.UTF8.GetBytes("anything at all"), new Dictionary<string, string>(), cfg));
+    }
+
+    [Fact]
+    public void VerifyNoMethodConfiguredFalse()
+    {
+        var cfg = AuthCfg();
+        Assert.False(Webhooks.VerifyWebhook(
+            Encoding.UTF8.GetBytes("{}"),
+            new Dictionary<string, string> { ["Authorization"] = "Bearer x" }, cfg));
+    }
+
+    [Fact]
+    public void ConfigRejectsTwoAuthMethods()
+    {
+        var path = FullData(d => { d["webhook_secret"] = "h"; d["webhook_bearer_token"] = "b"; });
+        Assert.Throws<ConfigException>(() => Config.FromFile(path));
+    }
+
+    [Fact]
+    public void ConfigRejectsBearerPlusNone()
+    {
+        var path = FullData(d => { d["webhook_bearer_token"] = "b"; d["webhook_auth_none"] = true; });
+        Assert.Throws<ConfigException>(() => Config.FromFile(path));
+    }
+
+    [Fact]
+    public void ConfigBasicRequiresBothFields()
+    {
+        var path = FullData(d => d["webhook_basic"] = new Dictionary<string, object?> { ["username"] = "u" });
+        Assert.Throws<ConfigException>(() => Config.FromFile(path));
+    }
+
+    [Fact]
+    public void ConfigHeaderRequiresBothFields()
+    {
+        var path = FullData(d => d["webhook_header"] = new Dictionary<string, object?> { ["name"] = "X-H" });
+        Assert.Throws<ConfigException>(() => Config.FromFile(path));
+    }
+
+    [Fact]
+    public void ConfigSingleMethodOkAndMethodName()
+    {
+        var cfg = Config.FromFile(FullData(d => d["webhook_bearer_token"] = "b"));
+        Assert.Equal("bearer", cfg.WebhookAuthMethod());
+        var cfg2 = Config.FromFile(FullData(d => d["webhook_secret"] = "h"));
+        Assert.Equal("hmac", cfg2.WebhookAuthMethod());
+        var cfg3 = Config.FromFile(FullData(d => d["webhook_auth_none"] = true));
+        Assert.Equal("none", cfg3.WebhookAuthMethod());
+    }
 }
