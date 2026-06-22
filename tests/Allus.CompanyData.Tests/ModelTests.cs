@@ -303,4 +303,62 @@ public class ModelTests
         Assert.Equal("ABC123", changes[0].ShareCode);
         Assert.Null(changes[1].ShareCode);
     }
+
+    // ── document_status_changed change + Document model ──────────────────────────────────────────
+
+    [Fact]
+    public void ChangeDocumentStatusChangedParses()
+    {
+        using var key = Vector.PrivateKey();
+        var body = Obj(new()
+        {
+            ["changes"] = Node.List(new List<Node>
+            {
+                Obj(new()
+                {
+                    ["id"] = S("chg-doc"), ["event"] = S("document_status_changed"),
+                    ["person_user_id"] = S("u-1"), ["share_code"] = S("ABC123"),
+                    ["document_id"] = S("doc-9"), ["status"] = S("ended"),
+                    ["at"] = S("2026-06-22T10:00:00Z"),
+                }),
+            }),
+        });
+        var chg = Change.ListFromApi(body, _ => null, DecryptWith(key))[0];
+        Assert.Equal("document_status_changed", chg.Event);
+        Assert.Equal("doc-9", chg.DocumentId);
+        Assert.Equal("ended", chg.Status);
+        Assert.Equal("u-1", chg.PersonId);
+        Assert.Equal("ABC123", chg.ShareCode);
+        Assert.Null(chg.Slug);
+        Assert.Null(chg.ValueObj);
+        Assert.Null(chg.Live);
+    }
+
+    [Fact]
+    public void DocumentModelBroadcastJsonIsPlaintext()
+    {
+        var doc = Document.FromApi(Obj(new()
+        {
+            ["id"] = S("d1"), ["kind"] = S("document"), ["name"] = S("Terms"), ["status"] = S("active"),
+            ["payload_kind"] = S("json"), ["is_private"] = S(false),
+            ["value"] = Obj(new() { ["v"] = S(1L) }), ["metadata"] = Obj(new()),
+        }));
+        var json = Assert.IsAssignableFrom<IDictionary<string, object?>>(doc.Json());
+        Assert.Equal(1L, json["v"]); // no decrypt needed
+    }
+
+    [Fact]
+    public void DocumentModelPerPersonJsonDecrypts()
+    {
+        using var key = Vector.PrivateKey();
+        var wrapper = Encryptor.Wrap(key, JsonSerializer.Serialize(new { plan = "pro" }));
+        var doc = Document.FromApi(Obj(new()
+        {
+            ["id"] = S("d2"), ["kind"] = S("document"), ["name"] = S("PP"), ["status"] = S("active"),
+            ["payload_kind"] = S("json"), ["is_private"] = S(true),
+            ["value"] = wrapper, ["metadata"] = Obj(new()),
+        }), DecryptWith(key));
+        var json = Assert.IsAssignableFrom<IDictionary<string, object?>>(doc.Json());
+        Assert.Equal("pro", json["plan"]); // decrypted via injected decrypt
+    }
 }

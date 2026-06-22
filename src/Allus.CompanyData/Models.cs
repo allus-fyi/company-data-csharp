@@ -249,6 +249,8 @@ public sealed record Change(
     string? Slug = null,
     object? ValueObj = null,
     bool? Live = null,
+    string? DocumentId = null,  // set on document_status_changed
+    string? Status = null,      // set on document_status_changed
     DateTimeOffset? At = null)
 {
     /// <summary>The underlying hardened API object (escape hatch).</summary>
@@ -280,6 +282,8 @@ public sealed record Change(
             Slug: slug,
             ValueObj: value,
             Live: live,
+            DocumentId: obj.Get("document_id").AsString(),
+            Status: ev == "document_status_changed" ? obj.Get("status").AsString() : null,
             At: ModelCoerce.ParseIsoDt(obj.Get("at").AsString()))
         {
             Raw = obj.ToObjectGraph(),
@@ -299,6 +303,101 @@ public sealed record Change(
             .Where(o => o.Kind == NodeKind.Object)
             .Select(o => FromApi(o, typeForSlug, decryptValue, binaryFetch))
             .ToList();
+    }
+}
+
+/// <summary>
+/// A company document the SDK created/queried (company-data side). Value semantics mirror the
+/// connection-payload contract — keyed on BROADCAST(plaintext) vs PER-PERSON(always encrypted),
+/// NOT on is_private:
+/// <code>
+///   broadcast file   -> {file, original_name, mime_type, size}   (plaintext)
+///   per-person file  -> {"_enc_file": "enc_…json"}   (ciphertext blob, ANY is_private)
+///   broadcast json   -> the JSON object   (plaintext)
+///   per-person json  -> {"_enc":1,k,iv,d}   (ciphertext wrapper, ANY is_private; decrypt via Json())
+/// </code>
+/// is_private is device-display-only (lock vs decrypt-on-load), not the value shape.
+/// </summary>
+public sealed record Document(
+    string? Id,
+    string? Kind,
+    string? Name,
+    string? Description,
+    string? Status,
+    string? PayloadKind,        // "file" | "json"
+    bool IsPrivate,
+    object? ValueObj,
+    object? Metadata,
+    DateTimeOffset? CreatedAt,
+    DateTimeOffset? UpdatedAt)
+{
+    // The raw value Node (used by Json() to detect an {"_enc":1,…} per-person wrapper) + the
+    // decrypt closure (over the loaded service private key). Neither is part of the public record.
+    private Node? _valueNode;
+    private DecryptValue? _decryptValue;
+
+    /// <summary>The underlying hardened API object (escape hatch).</summary>
+    public object? Raw { get; init; }
+
+    /// <summary>
+    /// For a json document, return the plaintext object. Decryption is keyed on the value SHAPE
+    /// (per-person → encrypted wrapper), NOT on is_private: a per-person json doc (ANY is_private)
+    /// is an <c>{"_enc":1,…}</c> wrapper decrypted with the SDK's own private key; a broadcast json
+    /// doc is already plaintext and returned as-is.
+    /// </summary>
+    public object? Json()
+    {
+        if (PayloadKind != "json")
+            throw new DecryptException("Json() is only valid for payload_kind='json' documents");
+        var node = _valueNode ?? Node.Null;
+        if (node.Kind == NodeKind.Object && node.Has("_enc")
+            && (ModelCoerce.CoerceBool(node.Get("_enc")) == true
+                || node.Get("_enc").AsString() == "1"))
+        {
+            if (_decryptValue is null)
+                throw new DecryptException("no decrypt wiring for an encrypted (per-person) document");
+            var plaintext = _decryptValue(node);
+            try
+            {
+                using var doc = JsonDocument.Parse(plaintext);
+                return Node.FromJson(doc.RootElement).ToObjectGraph();
+            }
+            catch (JsonException ex)
+            {
+                throw new DecryptException("decrypted document json is not valid JSON", ex);
+            }
+        }
+        return ValueObj;
+    }
+
+    public static Document FromApi(Node obj, DecryptValue? decryptValue = null)
+    {
+        var valueNode = obj.Get("value");
+        return new Document(
+            Id: obj.Get("id").AsString(),
+            Kind: obj.Get("kind").AsString(),
+            Name: obj.Get("name").AsString(),
+            Description: obj.Get("description").AsString(),
+            Status: obj.Get("status").AsString(),
+            PayloadKind: obj.Get("payload_kind").AsString(),
+            IsPrivate: ModelCoerce.CoerceBool(obj.Get("is_private")) ?? false,
+            ValueObj: obj.Has("value") ? valueNode.ToObjectGraph() : null,
+            Metadata: obj.Has("metadata") ? obj.Get("metadata").ToObjectGraph() : null,
+            CreatedAt: ModelCoerce.ParseIsoDt(obj.Get("created_at").AsString()),
+            UpdatedAt: ModelCoerce.ParseIsoDt(obj.Get("updated_at").AsString()))
+        {
+            _valueNode = obj.Has("value") ? valueNode : Node.Null,
+            _decryptValue = decryptValue,
+            Raw = obj.ToObjectGraph(),
+        };
+    }
+
+    public static List<Document> ListFromApi(Node body, DecryptValue? decryptValue = null)
+    {
+        var items = body.Kind == NodeKind.Object && body.Has("items")
+            ? body.Get("items").AsList()
+            : body.Kind == NodeKind.List ? body.AsList() : new List<Node>();
+        return items.Select(o => FromApi(o, decryptValue)).ToList();
     }
 }
 

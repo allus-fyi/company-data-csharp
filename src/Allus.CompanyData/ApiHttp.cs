@@ -132,30 +132,89 @@ public sealed class ApiHttp
     /// <see cref="Node"/>. Adds the bearer token + an Accept header matching <c>Config.Format</c>,
     /// parses JSON or XML, and maps non-2xx to the §9 errors.
     /// </summary>
-    public async Task<Node> GetAsync(
+    public Task<Node> GetAsync(
         string path,
         IReadOnlyDictionary<string, string>? query = null,
+        CancellationToken ct = default)
+        => RequestAsync("GET", path, query: query, ct: ct);
+
+    /// <summary>
+    /// POST <paramref name="path"/> with a JSON body (<paramref name="jsonBody"/>) OR raw bytes
+    /// (<paramref name="rawBody"/> + <paramref name="contentType"/>) → a parsed <see cref="Node"/>.
+    /// </summary>
+    public Task<Node> PostAsync(
+        string path,
+        object? jsonBody = null,
+        byte[]? rawBody = null,
+        string? contentType = null,
+        CancellationToken ct = default)
+        => RequestAsync("POST", path, jsonBody: jsonBody, rawBody: rawBody, contentType: contentType, ct: ct);
+
+    /// <summary>PUT <paramref name="path"/> with a JSON body → a parsed <see cref="Node"/>.</summary>
+    public Task<Node> PutAsync(
+        string path,
+        object? jsonBody = null,
+        CancellationToken ct = default)
+        => RequestAsync("PUT", path, jsonBody: jsonBody, ct: ct);
+
+    /// <summary>DELETE <paramref name="path"/> → a parsed <see cref="Node"/>.</summary>
+    public Task<Node> DeleteAsync(
+        string path,
+        CancellationToken ct = default)
+        => RequestAsync("DELETE", path, ct: ct);
+
+    /// <summary>
+    /// The shared request loop for every verb. Adds the bearer token + an Accept header matching
+    /// <c>Config.Format</c>, carries an optional JSON or raw-bytes body, parses JSON or XML, and maps
+    /// non-2xx responses to the SDK errors: 401 → one refresh-and-retry then <see cref="AuthException"/>;
+    /// 429 → bounded Retry-After backoff then <see cref="RateLimitException"/>; other non-2xx →
+    /// <see cref="ApiException"/> (carrying the body's <c>error_key</c> when present).
+    /// </summary>
+    private async Task<Node> RequestAsync(
+        string method,
+        string path,
+        IReadOnlyDictionary<string, string>? query = null,
+        object? jsonBody = null,
+        byte[]? rawBody = null,
+        string? contentType = null,
         CancellationToken ct = default)
     {
         var url = BuildUrl(path);
         var wantsXml = _config.Format == "xml";
         var accept = wantsXml ? "application/xml" : "application/json";
 
+        // Resolve the request body once: raw bytes win; else a JSON body is serialized.
+        byte[]? body = null;
+        string? bodyContentType = null;
+        if (rawBody is not null)
+        {
+            body = rawBody;
+            bodyContentType = contentType ?? "application/octet-stream";
+        }
+        else if (jsonBody is not null)
+        {
+            body = System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(jsonBody));
+            bodyContentType = "application/json";
+        }
+
+        var isGet = string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase);
+
         var retries429 = 0;
         var refreshed401 = false;
         while (true)
         {
             var token = await BearerAsync(forceRefresh: false, ct).ConfigureAwait(false);
+            var headers = new Dictionary<string, string>
+            {
+                ["Authorization"] = $"Bearer {token}",
+                ["Accept"] = accept,
+            };
             HttpResult resp;
             try
             {
-                resp = await _transport.GetAsync(
-                    url, query,
-                    new Dictionary<string, string>
-                    {
-                        ["Authorization"] = $"Bearer {token}",
-                        ["Accept"] = accept,
-                    }, ct).ConfigureAwait(false);
+                resp = isGet
+                    ? await _transport.GetAsync(url, query, headers, ct).ConfigureAwait(false)
+                    : await _transport.SendAsync(method, url, body, bodyContentType, headers, ct).ConfigureAwait(false);
             }
             catch (HttpRequestException ex)
             {

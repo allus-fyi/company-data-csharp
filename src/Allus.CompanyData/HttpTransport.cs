@@ -36,6 +36,19 @@ public interface IHttpTransport
         IReadOnlyDictionary<string, string>? query,
         IReadOnlyDictionary<string, string> headers,
         CancellationToken ct);
+
+    /// <summary>
+    /// Send a body verb (POST/PUT/DELETE) carrying a raw byte body with an explicit Content-Type
+    /// (the JSON path serializes the body to bytes + <c>application/json</c> in the layer above).
+    /// A null <paramref name="body"/> sends no body (e.g. DELETE).
+    /// </summary>
+    Task<HttpResult> SendAsync(
+        string method,
+        string url,
+        byte[]? body,
+        string? contentType,
+        IReadOnlyDictionary<string, string> headers,
+        CancellationToken ct);
 }
 
 /// <summary>Default <see cref="IHttpTransport"/> over <see cref="System.Net.Http.HttpClient"/>.</summary>
@@ -70,6 +83,26 @@ public sealed class HttpTransport : IHttpTransport
     {
         var full = query is { Count: > 0 } ? url + "?" + BuildQuery(query) : url;
         using var req = new HttpRequestMessage(HttpMethod.Get, full);
+        ApplyHeaders(req, headers);
+        return await SendAsync(req, ct).ConfigureAwait(false);
+    }
+
+    public async Task<HttpResult> SendAsync(
+        string method,
+        string url,
+        byte[]? body,
+        string? contentType,
+        IReadOnlyDictionary<string, string> headers,
+        CancellationToken ct)
+    {
+        using var req = new HttpRequestMessage(new HttpMethod(method), url);
+        if (body is not null)
+        {
+            var content = new ByteArrayContent(body);
+            content.Headers.ContentType =
+                new System.Net.Http.Headers.MediaTypeHeaderValue(contentType ?? "application/octet-stream");
+            req.Content = content;
+        }
         ApplyHeaders(req, headers);
         return await SendAsync(req, ct).ConfigureAwait(false);
     }

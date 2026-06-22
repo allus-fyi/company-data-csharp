@@ -334,4 +334,218 @@ public sealed class ClientTests : IDisposable
         }));
         Assert.Throws<ConfigException>(() => Client.FromConfig(cfgPath));
     }
+
+    // ── company documents (write) ────────────────────────────────────────────────────────────────
+
+    private (Client Client, RouterTransport Transport) MakeRw(
+        Func<string, IReadOnlyDictionary<string, string>?, HttpResult> getRouter,
+        Func<string, string, byte[]?, HttpResult> writeRouter)
+    {
+        var transport = new RouterTransport(getRouter, writeRouter);
+        return (new Client(_config, http: new ApiHttp(_config, transport: transport)), transport);
+    }
+
+    private static string VectorPubSpkiB64()
+    {
+        using var key = Vector.PrivateKey();
+        return Convert.ToBase64String(key.ExportSubjectPublicKeyInfo());
+    }
+
+    private static HttpResult NoGet(string url, IReadOnlyDictionary<string, string>? q)
+        => throw new Xunit.Sdk.XunitException("unexpected GET " + url);
+
+    private static JsonElement ParseBody(byte[]? body)
+    {
+        using var doc = JsonDocument.Parse(System.Text.Encoding.UTF8.GetString(body!));
+        return doc.RootElement.Clone();
+    }
+
+    [Fact]
+    public async Task CreateDocumentBroadcastJsonIsPlaintext()
+    {
+        JsonElement posted = default;
+        var (client, _) = MakeRw(NoGet, (method, url, body) =>
+        {
+            Assert.Equal("POST", method);
+            Assert.EndsWith("/documents", url);
+            posted = ParseBody(body);
+            return Resp.Json(201, new
+            {
+                id = "d1", kind = "document", name = "Terms", description = (string?)null,
+                status = "active", payload_kind = "json", is_private = false,
+                value = new { url = "x", v = "1" }, metadata = (object?)null,
+                created_at = (string?)null, updated_at = (string?)null,
+            });
+        });
+        using (client)
+        {
+            var doc = await client.CreateDocumentAsync(name: "Terms", payloadKind: "json",
+                jsonValue: new { url = "x", v = "1" }, status: "active");
+            Assert.Equal(JsonValueKind.Null, posted.GetProperty("target").ValueKind);
+            var val = posted.GetProperty("value");
+            Assert.Equal("x", val.GetProperty("url").GetString()); // plaintext, no _enc
+            Assert.False(val.TryGetProperty("_enc", out _));
+            Assert.False(posted.GetProperty("is_private").GetBoolean());
+            Assert.Equal("d1", doc.Id);
+            Assert.Equal("active", doc.Status);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CreateDocumentPerPersonEncryptsForBothPrivacy(bool isPrivate)
+    {
+        var spki = VectorPubSpkiB64();
+        var keysFetched = 0;
+        JsonElement captured = default;
+        var (client, _) = MakeRw(
+            (url, q) =>
+            {
+                Assert.EndsWith("/api/keys/ABC123", url);
+                keysFetched++;
+                return Resp.Json(200, new { public_key = spki });
+            },
+            (method, url, body) =>
+            {
+                captured = ParseBody(body);
+                return Resp.Json(201, new
+                {
+                    id = "d2", kind = "document", name = "PP", description = (string?)null,
+                    status = "active", payload_kind = "json", is_private = isPrivate,
+                    value = new { }, metadata = (object?)null,
+                    created_at = (string?)null, updated_at = (string?)null,
+                });
+            });
+        using (client)
+        {
+            var doc = await client.CreateDocumentAsync(name: "PP", payloadKind: "json",
+                jsonValue: new { plan = "pro" }, connectionId: "conn-1", shareCode: "ABC123",
+                isPrivate: isPrivate);
+            Assert.Equal(1, keysFetched); // fetched the recipient key
+            var val = captured.GetProperty("value");
+            Assert.Equal(JsonValueKind.Object, val.ValueKind);
+            Assert.Equal(1, val.GetProperty("_enc").GetInt32()); // ENCRYPTED, any is_private
+            Assert.True(val.TryGetProperty("k", out _) && val.TryGetProperty("iv", out _) && val.TryGetProperty("d", out _));
+            Assert.Equal("conn-1", captured.GetProperty("target").GetProperty("connection_id").GetString());
+            Assert.Equal(isPrivate, captured.GetProperty("is_private").GetBoolean());
+
+            // round-trips through the SDK's own decrypt → the original plaintext
+            using var priv = Vector.PrivateKey();
+            var plaintext = Crypto.Decrypt(Node.FromJson(val), priv);
+            using var pdoc = JsonDocument.Parse(plaintext);
+            Assert.Equal("pro", pdoc.RootElement.GetProperty("plan").GetString());
+            Assert.Equal("d2", doc.Id);
+        }
+    }
+
+    [Fact]
+    public async Task CreateDocumentPrivateBroadcastThrows()
+    {
+        var (client, _) = MakeRw(NoGet, (m, u, b) => Resp.Json(200, new { }));
+        using (client)
+        {
+            await Assert.ThrowsAsync<ConfigException>(() =>
+                client.CreateDocumentAsync(name: "x", payloadKind: "json",
+                    jsonValue: new { a = 1 }, isPrivate: true));
+        }
+    }
+
+    [Fact]
+    public async Task CreateDocumentFileBroadcastUploadsRawBytes()
+    {
+        var (client, transport) = MakeRw(NoGet, (method, url, body) =>
+        {
+            if (url.EndsWith("/documents"))
+                return Resp.Json(201, new
+                {
+                    id = "f1", kind = "document", name = "C", description = (string?)null,
+                    status = "active", payload_kind = "file", is_private = false,
+                    value = new { _pending = true }, metadata = (object?)null,
+                    created_at = (string?)null, updated_at = (string?)null,
+                });
+            Assert.EndsWith("/documents/f1/file", url);
+            return Resp.Json(200, new { id = "f1" });
+        });
+        using (client)
+        {
+            var raw = System.Text.Encoding.UTF8.GetBytes("%PDF-1.4 x");
+            await client.CreateDocumentAsync(name: "C", payloadKind: "file",
+                fileBytes: raw, fileMime: "application/pdf");
+            Assert.EndsWith("/documents", transport.Writes[0].Url);
+            // first POST has a JSON target=null body
+            Assert.Equal(JsonValueKind.Null, ParseBody(transport.Writes[0].Body).GetProperty("target").ValueKind);
+            Assert.EndsWith("/documents/f1/file", transport.Writes[1].Url);
+            Assert.Equal(raw, transport.Writes[1].Body); // raw plaintext bytes
+            Assert.Equal("application/pdf", transport.Writes[1].ContentType);
+        }
+    }
+
+    [Fact]
+    public async Task CreateDocumentFilePerPersonUploadsWrapperBytes()
+    {
+        var spki = VectorPubSpkiB64();
+        var (client, transport) = MakeRw(
+            (url, q) => Resp.Json(200, new { public_key = spki }),
+            (method, url, body) =>
+            {
+                if (url.EndsWith("/documents"))
+                    return Resp.Json(201, new
+                    {
+                        id = "f2", kind = "document", name = "C", description = (string?)null,
+                        status = "active", payload_kind = "file", is_private = true,
+                        value = new { _pending = true }, metadata = (object?)null,
+                        created_at = (string?)null, updated_at = (string?)null,
+                    });
+                return Resp.Json(200, new { id = "f2" });
+            });
+        using (client)
+        {
+            await client.CreateDocumentAsync(name: "C", payloadKind: "file",
+                fileBytes: System.Text.Encoding.UTF8.GetBytes("hello-bytes"),
+                fileMime: "application/pdf", personUserId: "u1", shareCode: "ABC123", isPrivate: true);
+            var upload = transport.Writes[1].Body;
+            Assert.NotNull(upload);
+            var wrapper = ParseBody(upload);
+            Assert.Equal(1, wrapper.GetProperty("_enc").GetInt32()); // ciphertext wrapper bytes, not raw file
+            // decrypt → the {"file":"data:...base64,..."} envelope holding the original bytes
+            using var priv = Vector.PrivateKey();
+            var env = Crypto.Decrypt(Node.FromJson(wrapper), priv);
+            using var edoc = JsonDocument.Parse(env);
+            var fileUri = edoc.RootElement.GetProperty("file").GetString()!;
+            Assert.StartsWith("data:application/pdf;base64,", fileUri);
+            var payload = Convert.FromBase64String(fileUri.Split(',', 2)[1]);
+            Assert.Equal(System.Text.Encoding.UTF8.GetBytes("hello-bytes"), payload);
+        }
+    }
+
+    [Fact]
+    public async Task DocumentVerbsHitRightPath()
+    {
+        var seen = new List<(string Method, string Url)>();
+        var (client, _) = MakeRw(
+            (url, q) =>
+            {
+                if (url.EndsWith("/documents")) return Resp.Json(200, new { total = 0, items = Array.Empty<object>() });
+                if (url.Contains("/documents/d9")) return Resp.Json(200, new { id = "d9", payload_kind = "json", is_private = false, value = new { a = 1 } });
+                throw new Xunit.Sdk.XunitException("unexpected GET " + url);
+            },
+            (method, url, body) =>
+            {
+                seen.Add((method, url));
+                return Resp.Json(200, new { id = "d9", payload_kind = "json", is_private = false, value = new { a = 1 }, status = "ended" });
+            });
+        using (client)
+        {
+            Assert.Empty(await client.ListDocumentsAsync(status: "active"));
+            Assert.Equal("d9", (await client.GetDocumentAsync("d9")).Id);
+            await client.UpdateDocumentStatusAsync("d9", "ended");
+            await client.UpdateDocumentMetadataAsync("d9", name: "renamed");
+            await client.DeleteDocumentAsync("d9");
+            var verbs = seen.Select(s => (s.Method, s.Url.Split("/api/company-data")[^1])).ToList();
+            Assert.Contains(("PUT", "/documents/d9"), verbs);
+            Assert.Equal(2, verbs.Count(v => v == ("PUT", "/documents/d9")));
+            Assert.Contains(("DELETE", "/documents/d9"), verbs);
+        }
+    }
 }

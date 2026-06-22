@@ -179,6 +179,30 @@ public class CryptoTests
         finally { Directory.Delete(dir, true); }
     }
 
+    // ── EncryptForPublicKey round-trips through Decrypt ──────────────────────────────────────────
+
+    [Fact]
+    public void EncryptForPublicKeyRoundTripsThroughDecrypt()
+    {
+        using var priv = RSA.Create(2048);
+        var spkiB64 = Convert.ToBase64String(priv.ExportSubjectPublicKeyInfo());
+        using var pub = Crypto.LoadPublicKey(spkiB64);
+        foreach (var pt in new[] { "hello", "{\"a\":1}", "with-üñîçödé" })
+        {
+            var wrapper = Crypto.EncryptForPublicKey(pt, pub);
+            Assert.True(wrapper.Has("k") && wrapper.Has("iv") && wrapper.Has("d"));
+            Assert.Equal(pt, Crypto.Decrypt(wrapper, priv));
+        }
+    }
+
+    [Fact]
+    public void LoadPublicKeyRejectsGarbage()
+    {
+        Assert.Throws<DecryptException>(() => Crypto.LoadPublicKey("not-base64!!"));
+        Assert.Throws<DecryptException>(() =>
+            Crypto.LoadPublicKey(Convert.ToBase64String(Encoding.UTF8.GetBytes("not a spki key"))));
+    }
+
     // ── Anti-circularity: independent openssl + node cross-check ────────────────────────────────
 
     [SkippableFact]

@@ -49,17 +49,38 @@ public sealed class QueueTransport : IHttpTransport
         Gets.Add((url, query, headers));
         return Task.FromResult(GetResponses.Dequeue());
     }
+
+    public Queue<HttpResult> WriteResponses { get; } = new();
+    public List<(string Method, string Url, byte[]? Body, string? ContentType)> Writes { get; } = new();
+
+    public Task<HttpResult> SendAsync(string method, string url, byte[]? body, string? contentType,
+        IReadOnlyDictionary<string, string> headers, CancellationToken ct)
+    {
+        Writes.Add((method, url, body, contentType));
+        return Task.FromResult(WriteResponses.Dequeue());
+    }
 }
 
-/// <summary>Routes GET by URL through a delegate; POST always returns the token.</summary>
+/// <summary>
+/// Routes GET by URL through a delegate; the token POST always returns the token; write verbs
+/// (POST/PUT/DELETE with a body) record + delegate to an optional write router (mirroring the
+/// Python reference's <c>FakeSession.request</c> / <c>write_router</c>).
+/// </summary>
 public sealed class RouterTransport : IHttpTransport
 {
     private readonly Func<string, IReadOnlyDictionary<string, string>?, HttpResult> _router;
+    private readonly Func<string, string, byte[]?, HttpResult>? _writeRouter;
     public List<(string Url, IReadOnlyDictionary<string, string>? Query)> Gets { get; } = new();
     public List<string> Posts { get; } = new();
+    public List<(string Method, string Url, byte[]? Body, string? ContentType)> Writes { get; } = new();
 
-    public RouterTransport(Func<string, IReadOnlyDictionary<string, string>?, HttpResult> router)
-        => _router = router;
+    public RouterTransport(
+        Func<string, IReadOnlyDictionary<string, string>?, HttpResult> router,
+        Func<string, string, byte[]?, HttpResult>? writeRouter = null)
+    {
+        _router = router;
+        _writeRouter = writeRouter;
+    }
 
     public Task<HttpResult> PostFormAsync(string url, IReadOnlyDictionary<string, string> form,
         IReadOnlyDictionary<string, string> headers, CancellationToken ct)
@@ -73,5 +94,14 @@ public sealed class RouterTransport : IHttpTransport
     {
         Gets.Add((url, query));
         return Task.FromResult(_router(url, query));
+    }
+
+    public Task<HttpResult> SendAsync(string method, string url, byte[]? body, string? contentType,
+        IReadOnlyDictionary<string, string> headers, CancellationToken ct)
+    {
+        Writes.Add((method, url, body, contentType));
+        if (_writeRouter is null)
+            return Task.FromResult(Resp.Json(200, new { }));
+        return Task.FromResult(_writeRouter(method, url, body));
     }
 }
