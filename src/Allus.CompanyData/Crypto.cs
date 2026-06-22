@@ -148,6 +148,83 @@ public static class Crypto
     }
 
     /// <summary>
+    /// Load a base64 SPKI/DER public key (the platform's <c>GET /api/keys</c> <c>public_key</c>) →
+    /// an RSA public key.
+    ///
+    /// Config-only key handling does NOT apply to a RECIPIENT public key: it is not a secret and is
+    /// fetched live from the API per-recipient (never configured). The SDK still never accepts a
+    /// PRIVATE key/passphrase as a method argument.
+    /// </summary>
+    public static RSA LoadPublicKey(string spkiB64)
+    {
+        byte[] der;
+        try
+        {
+            der = Convert.FromBase64String(spkiB64);
+        }
+        catch (FormatException ex)
+        {
+            throw new DecryptException("recipient public_key is not valid base64", ex);
+        }
+        var rsa = RSA.Create();
+        try
+        {
+            rsa.ImportSubjectPublicKeyInfo(der, out _);
+        }
+        catch (Exception ex) when (ex is CryptographicException or ArgumentException or FormatException)
+        {
+            rsa.Dispose();
+            throw new DecryptException($"recipient public_key is not a valid SPKI key: {ex.Message}", ex);
+        }
+        return rsa;
+    }
+
+    /// <summary>
+    /// Encrypt a UTF-8 string FOR a recipient RSA public key → a <c>{"_enc":1,k,iv,d}</c> wrapper
+    /// (as a <see cref="Node"/>). The exact inverse of <see cref="Decrypt"/>:
+    /// <code>
+    ///   aesKey  = 32 random bytes
+    ///   d       = AES-256-GCM(aesKey, iv=12 random bytes).encrypt(utf8(plaintext))  // tag appended
+    ///   k       = RSA-OAEP(SHA-256, MGF1-SHA256).encrypt(aesKey, public_key)
+    /// </code>
+    /// Used for EVERY per-person (targeted) document (json + file), independent of is_private —
+    /// broadcast docs stay plaintext. Round-trips through <see cref="Decrypt"/>.
+    /// </summary>
+    public static Node EncryptForPublicKey(string plaintext, RSA publicKey)
+    {
+        var aesKey = RandomNumberGenerator.GetBytes(32);
+        var iv = RandomNumberGenerator.GetBytes(GcmIvLen); // 12
+        try
+        {
+            var pt = Encoding.UTF8.GetBytes(plaintext);
+            var ciphertext = new byte[pt.Length];
+            var tag = new byte[GcmTagLen];
+            using (var aes = new AesGcm(aesKey, GcmTagLen))
+                aes.Encrypt(iv, pt, ciphertext, tag);
+
+            // The platform layout appends the 16-byte GCM tag to the ciphertext.
+            var d = new byte[ciphertext.Length + GcmTagLen];
+            Buffer.BlockCopy(ciphertext, 0, d, 0, ciphertext.Length);
+            Buffer.BlockCopy(tag, 0, d, ciphertext.Length, GcmTagLen);
+
+            // RSA-OAEP(SHA-256, MGF1-SHA256) — .NET's OaepSHA256 pins MGF1-SHA256 (never SHA-1).
+            var encKey = publicKey.Encrypt(aesKey, RSAEncryptionPadding.OaepSHA256);
+
+            return Node.Object(new Dictionary<string, Node>
+            {
+                ["_enc"] = Node.Scalar(1L),
+                ["k"] = Node.Scalar(Convert.ToBase64String(encKey)),
+                ["iv"] = Node.Scalar(Convert.ToBase64String(iv)),
+                ["d"] = Node.Scalar(Convert.ToBase64String(d)),
+            });
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(aesKey);
+        }
+    }
+
+    /// <summary>
     /// Pull the <c>k</c>/<c>iv</c>/<c>d</c> fields out of a wrapper that may be a
     /// <see cref="JsonElement"/>, an <c>IDictionary</c>, or a JSON string. Throws
     /// <see cref="DecryptException"/> on anything malformed or with a missing field.

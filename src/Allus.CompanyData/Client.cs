@@ -27,6 +27,7 @@
 
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
+using System.Text.Json;
 
 namespace Allus.CompanyData;
 
@@ -38,6 +39,8 @@ public sealed class Client : IDisposable
     private const string ChangesPath = Base + "/changes";
     private const string RequestFieldsPath = Base + "/request-fields";
     private const string LogsPath = Base + "/logs";
+    private const string DocumentsPath = Base + "/documents";
+    private const string KeysPath = "/api/keys";
 
     // Default page size for the connections iterator (heavily rate-limited).
     private const int DefaultConnPage = 100;
@@ -59,6 +62,10 @@ public sealed class Client : IDisposable
     private Dictionary<string, string?> _typeBySlug = new();
     private Pump? _pump;
     private bool _disposed;
+
+    // Recipient RSA public keys (by share_code) — cached for per-person document encryption. A
+    // public key is immutable + not a secret (fetched live, never configured).
+    private readonly Dictionary<string, RSA> _pubkeyCache = new();
 
     public Client(
         Config config,
@@ -335,6 +342,213 @@ public sealed class Client : IDisposable
             RequestFieldsAsync().GetAwaiter().GetResult();
     }
 
+    // ── company documents (write) ───────────────────────────────────────────────────────────────
+
+    /// <summary>Fetch + cache the recipient RSA public key by share_code (GET /api/keys/{shareCode}).</summary>
+    public async Task<RSA> RecipientPublicKeyAsync(string shareCode, CancellationToken ct = default)
+    {
+        if (_pubkeyCache.TryGetValue(shareCode, out var cached))
+            return cached;
+        var body = await _http.GetAsync($"{KeysPath}/{shareCode}", ct: ct).ConfigureAwait(false);
+        var spki = body.Kind == NodeKind.Object ? body.Get("public_key").AsString() : null;
+        if (string.IsNullOrEmpty(spki))
+            throw new ApiException(0, "keys.not_found", $"no public_key for share_code {shareCode}");
+        var key = Crypto.LoadPublicKey(spki);
+        _pubkeyCache[shareCode] = key;
+        return key;
+    }
+
+    /// <summary>
+    /// Resolve a target's share_code (the recipient public-key handle). Prefers a single-connection
+    /// fetch (carries <c>share_code</c>); falls back to a connections scan by <c>user_id</c>. Pass
+    /// <c>shareCode</c> to <see cref="CreateDocumentAsync"/> to skip this entirely.
+    /// </summary>
+    private async Task<string> ResolveShareCodeAsync(
+        string? connectionId, string? personUserId, CancellationToken ct)
+    {
+        if (!string.IsNullOrEmpty(connectionId))
+        {
+            var body = await _http.GetAsync($"{ConnectionsPath}/{connectionId}", ct: ct).ConfigureAwait(false);
+            var sc = body.Kind == NodeKind.Object ? body.Get("share_code").AsString() : null;
+            if (!string.IsNullOrEmpty(sc)) return sc!;
+        }
+        if (!string.IsNullOrEmpty(personUserId))
+        {
+            await foreach (var conn in ConnectionsAsync(ct: ct).ConfigureAwait(false))
+            {
+                var raw = conn.Raw as IReadOnlyDictionary<string, object?>;
+                var rawUserId = raw is not null && raw.TryGetValue("user_id", out var u) ? u as string : null;
+                if (rawUserId == personUserId || conn.PersonId == personUserId)
+                {
+                    var sc = raw is not null && raw.TryGetValue("share_code", out var s) ? s as string : null;
+                    if (!string.IsNullOrEmpty(sc)) return sc!;
+                }
+            }
+        }
+        throw new ConfigException(
+            "could not resolve a share_code for the target — pass shareCode explicitly");
+    }
+
+    /// <summary>
+    /// Create a company document for a connection / person (PER-PERSON), or BROADCAST (no target).
+    /// <c>payloadKind="json"</c> → <paramref name="jsonValue"/> (object). <c>payloadKind="file"</c> →
+    /// <paramref name="fileBytes"/> (+ <paramref name="fileMime"/>).
+    ///
+    /// Encryption is decided by the TARGET, not by is_private:
+    ///   PER-PERSON (connectionId/personUserId given) → the value is ALWAYS encrypted FOR THE
+    ///     RECIPIENT (share_code resolved when not given) before it leaves the process — for EVERY
+    ///     per-person doc, private or not. NO key argument.
+    ///   BROADCAST (no target) → the value is sent PLAINTEXT. A broadcast MUST be non-private
+    ///     (a plaintext value cannot be locked); <c>isPrivate=true</c> therefore requires a target.
+    ///
+    /// is_private is a DISPLAY-ONLY flag passed through to the API.
+    /// </summary>
+    public async Task<Document> CreateDocumentAsync(
+        string name,
+        string payloadKind,
+        string kind = "document",
+        bool isPrivate = false,
+        string? description = null,
+        string? connectionId = null,
+        string? personUserId = null,
+        string? shareCode = null,
+        object? jsonValue = null,
+        byte[]? fileBytes = null,
+        string? fileMime = null,
+        object? metadata = null,
+        string? status = null,
+        CancellationToken ct = default)
+    {
+        if (payloadKind is not ("json" or "file"))
+            throw new ConfigException("payloadKind must be 'json' or 'file'");
+
+        Dictionary<string, object?>? target = null;
+        if (!string.IsNullOrEmpty(connectionId))
+            target = new Dictionary<string, object?> { ["connection_id"] = connectionId };
+        else if (!string.IsNullOrEmpty(personUserId))
+            target = new Dictionary<string, object?> { ["person_user_id"] = personUserId };
+        // (else: broadcast — target stays null)
+
+        var perPerson = target is not null;
+        if (isPrivate && !perPerson)
+            throw new ConfigException("isPrivate=true requires a per-person target (broadcast is plaintext)");
+
+        RSA? pubkey = null;
+        if (perPerson)
+        {
+            var sc = shareCode ?? await ResolveShareCodeAsync(connectionId, personUserId, ct).ConfigureAwait(false);
+            pubkey = await RecipientPublicKeyAsync(sc, ct).ConfigureAwait(false);
+        }
+
+        var body = new Dictionary<string, object?>
+        {
+            ["kind"] = kind,
+            ["name"] = name,
+            ["payload_kind"] = payloadKind,
+            ["is_private"] = isPrivate,
+            ["target"] = target,
+        };
+        if (description is not null) body["description"] = description;
+        if (metadata is not null) body["metadata"] = metadata;
+        if (status is not null) body["status"] = status;
+
+        if (payloadKind == "json")
+        {
+            if (jsonValue is null)
+                throw new ConfigException("jsonValue is required for payloadKind='json'");
+            body["value"] = perPerson
+                ? Crypto.EncryptForPublicKey(JsonSerializer.Serialize(jsonValue), pubkey!).ToObjectGraph()
+                : jsonValue;
+            var created = await _http.PostAsync(DocumentsPath, jsonBody: body, ct: ct).ConfigureAwait(false);
+            return Document.FromApi(DocObj(created), DecryptValueImpl);
+        }
+
+        // file: create the metadata row first, then upload bytes to /{id}/file.
+        if (fileBytes is null)
+            throw new ConfigException("fileBytes is required for payloadKind='file'");
+        var createdFile = await _http.PostAsync(DocumentsPath, jsonBody: body, ct: ct).ConfigureAwait(false);
+        var doc = Document.FromApi(DocObj(createdFile), DecryptValueImpl);
+        if (perPerson)
+        {
+            // Encrypt the file bytes (EVERY per-person doc): wrap the file envelope string, then send
+            // the wrapper as bytes.
+            var envelope = JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["file"] = DataUri(fileBytes, fileMime),
+            });
+            var wrapper = Crypto.EncryptForPublicKey(envelope, pubkey!);
+            await _http.PostAsync($"{DocumentsPath}/{doc.Id}/file",
+                rawBody: System.Text.Encoding.UTF8.GetBytes(wrapper.ToJsonString()),
+                contentType: "application/json", ct: ct).ConfigureAwait(false);
+        }
+        else
+        {
+            // Broadcast — raw plaintext bytes.
+            await _http.PostAsync($"{DocumentsPath}/{doc.Id}/file",
+                rawBody: fileBytes,
+                contentType: fileMime ?? "application/octet-stream", ct: ct).ConfigureAwait(false);
+        }
+        return doc;
+    }
+
+    /// <summary>List this service's documents (paged; optional person/status filter).</summary>
+    public async Task<List<Document>> ListDocumentsAsync(
+        string? personUserId = null,
+        string? status = null,
+        int limit = 100,
+        int offset = 0,
+        CancellationToken ct = default)
+    {
+        var query = new Dictionary<string, string>
+        {
+            ["limit"] = Math.Max(1, limit).ToString(),
+            ["offset"] = Math.Max(0, offset).ToString(),
+        };
+        if (!string.IsNullOrEmpty(personUserId)) query["person_user_id"] = personUserId;
+        if (!string.IsNullOrEmpty(status)) query["status"] = status;
+        var body = await _http.GetAsync(DocumentsPath, query, ct).ConfigureAwait(false);
+        return Document.ListFromApi(body, DecryptValueImpl);
+    }
+
+    /// <summary>Fetch one document by id → <see cref="Document"/>.</summary>
+    public async Task<Document> GetDocumentAsync(string documentId, CancellationToken ct = default)
+    {
+        var body = await _http.GetAsync($"{DocumentsPath}/{documentId}", ct: ct).ConfigureAwait(false);
+        return Document.FromApi(DocObj(body), DecryptValueImpl);
+    }
+
+    /// <summary>Set a document's lifecycle status (offering|ready_to_sign|active|active_but_ending|ended).</summary>
+    public async Task<Document> UpdateDocumentStatusAsync(string documentId, string status, CancellationToken ct = default)
+    {
+        var body = await _http.PutAsync($"{DocumentsPath}/{documentId}",
+            jsonBody: new Dictionary<string, object?> { ["status"] = status }, ct: ct).ConfigureAwait(false);
+        return Document.FromApi(DocObj(body), DecryptValueImpl);
+    }
+
+    /// <summary>Update a document's metadata / name / description.</summary>
+    public async Task<Document> UpdateDocumentMetadataAsync(
+        string documentId,
+        object? metadata = null,
+        string? name = null,
+        string? description = null,
+        CancellationToken ct = default)
+    {
+        var payload = new Dictionary<string, object?>();
+        if (metadata is not null) payload["metadata"] = metadata;
+        if (name is not null) payload["name"] = name;
+        if (description is not null) payload["description"] = description;
+        if (payload.Count == 0)
+            throw new ConfigException("UpdateDocumentMetadataAsync needs metadata, name, or description");
+        var body = await _http.PutAsync($"{DocumentsPath}/{documentId}", jsonBody: payload, ct: ct).ConfigureAwait(false);
+        return Document.FromApi(DocObj(body), DecryptValueImpl);
+    }
+
+    /// <summary>Delete a document (and its on-disk file).</summary>
+    public async Task DeleteDocumentAsync(string documentId, CancellationToken ct = default)
+    {
+        await _http.DeleteAsync($"{DocumentsPath}/{documentId}", ct).ConfigureAwait(false);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────────────
 
     private static RSA LoadServiceKey(Config config)
@@ -362,6 +576,25 @@ public sealed class Client : IDisposable
         return new List<Node>();
     }
 
+    /// <summary>
+    /// Pull the document object out of a create/get/update response. The API returns the bare
+    /// document object; tolerate a <c>{"document": {...}}</c> wrapper too.
+    /// </summary>
+    private static Node DocObj(Node body)
+    {
+        if (body.Kind == NodeKind.Object)
+        {
+            var inner = body.Get("document");
+            if (inner.Kind == NodeKind.Object) return inner;
+            return body;
+        }
+        return Node.Object(new Dictionary<string, Node>());
+    }
+
+    /// <summary>Build a <c>data:&lt;mime&gt;;base64,&lt;…&gt;</c> URI for the per-person file envelope.</summary>
+    private static string DataUri(byte[] fileBytes, string? mime) =>
+        $"data:{mime ?? "application/octet-stream"};base64,{Convert.ToBase64String(fileBytes)}";
+
     private static double ConnBackoff(double? retryAfter, int attempt)
     {
         if (retryAfter is >= 0)
@@ -378,5 +611,6 @@ public sealed class Client : IDisposable
         _disposed = true;
         _privateKey.Dispose();
         _accountKey?.Dispose();
+        foreach (var key in _pubkeyCache.Values) key.Dispose();
     }
 }
