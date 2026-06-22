@@ -415,12 +415,16 @@ public sealed class Client : IDisposable
         object? jsonValue = null,
         byte[]? fileBytes = null,
         string? fileMime = null,
+        bool requiresSignature = false,
+        bool requiresAcceptance = false,
         object? metadata = null,
         string? status = null,
         CancellationToken ct = default)
     {
         if (payloadKind is not ("json" or "file"))
             throw new ConfigException("payloadKind must be 'json' or 'file'");
+        if (kind is not ("document" or "agreement" or "subscription"))
+            throw new ConfigException("kind must be 'document', 'agreement' or 'subscription'");
 
         Dictionary<string, object?>? target = null;
         if (!string.IsNullOrEmpty(connectionId))
@@ -430,6 +434,10 @@ public sealed class Client : IDisposable
         // (else: broadcast — target stays null)
 
         var perPerson = target is not null;
+        // A contract (agreement/subscription, or either flag) is ALWAYS per-person → it must target one person.
+        var isContract = kind is "agreement" or "subscription" || requiresSignature || requiresAcceptance;
+        if (isContract && !perPerson)
+            throw new ConfigException("a contract must target one connected person");
         if (isPrivate && !perPerson)
             throw new ConfigException("isPrivate=true requires a per-person target (broadcast is plaintext)");
 
@@ -446,6 +454,8 @@ public sealed class Client : IDisposable
             ["name"] = name,
             ["payload_kind"] = payloadKind,
             ["is_private"] = isPrivate,
+            ["requires_signature"] = requiresSignature,
+            ["requires_acceptance"] = requiresAcceptance,
             ["target"] = target,
         };
         if (description is not null) body["description"] = description;

@@ -251,6 +251,7 @@ public sealed record Change(
     bool? Live = null,
     string? DocumentId = null,  // set on document_status_changed
     string? Status = null,      // set on document_status_changed
+    string? Action = null,      // set on document_status_changed for a contract: signed | accepted | cancelled
     DateTimeOffset? At = null)
 {
     /// <summary>The underlying hardened API object (escape hatch).</summary>
@@ -284,6 +285,7 @@ public sealed record Change(
             Live: live,
             DocumentId: obj.Get("document_id").AsString(),
             Status: ev == "document_status_changed" ? obj.Get("status").AsString() : null,
+            Action: ev == "document_status_changed" ? obj.Get("action").AsString() : null,
             At: ModelCoerce.ParseIsoDt(obj.Get("at").AsString()))
         {
             Raw = obj.ToObjectGraph(),
@@ -329,7 +331,10 @@ public sealed record Document(
     object? ValueObj,
     object? Metadata,
     DateTimeOffset? CreatedAt,
-    DateTimeOffset? UpdatedAt)
+    DateTimeOffset? UpdatedAt,
+    bool RequiresSignature = false,
+    bool RequiresAcceptance = false,
+    IReadOnlyList<object?>? Signatures = null)  // contract sign/accept audit trail (company-side reads only)
 {
     // The raw value Node (used by Json() to detect an {"_enc":1,…} per-person wrapper) + the
     // decrypt closure (over the loaded service private key). Neither is part of the public record.
@@ -384,7 +389,12 @@ public sealed record Document(
             ValueObj: obj.Has("value") ? valueNode.ToObjectGraph() : null,
             Metadata: obj.Has("metadata") ? obj.Get("metadata").ToObjectGraph() : null,
             CreatedAt: ModelCoerce.ParseIsoDt(obj.Get("created_at").AsString()),
-            UpdatedAt: ModelCoerce.ParseIsoDt(obj.Get("updated_at").AsString()))
+            UpdatedAt: ModelCoerce.ParseIsoDt(obj.Get("updated_at").AsString()),
+            RequiresSignature: ModelCoerce.CoerceBool(obj.Get("requires_signature")) ?? false,
+            RequiresAcceptance: ModelCoerce.CoerceBool(obj.Get("requires_acceptance")) ?? false,
+            Signatures: obj.Has("signatures") && obj.Get("signatures").Kind == NodeKind.List
+                ? obj.Get("signatures").AsList().Select(n => n.ToObjectGraph()).ToList()
+                : new List<object?>())
         {
             _valueNode = obj.Has("value") ? valueNode : Node.Null,
             _decryptValue = decryptValue,

@@ -452,6 +452,30 @@ public sealed class ClientTests : IDisposable
     }
 
     [Fact]
+    public async Task CreateDocumentContractWithoutTargetThrows()
+    {
+        var (client, _) = MakeRw(NoGet, (m, u, b) => Resp.Json(200, new { }));
+        using (client)
+        {
+            await Assert.ThrowsAsync<ConfigException>(() =>
+                client.CreateDocumentAsync(name: "Agreement", payloadKind: "json",
+                    kind: "agreement", requiresSignature: true, jsonValue: new { a = 1 }));
+        }
+    }
+
+    [Fact]
+    public async Task CreateDocumentInvalidKindThrows()
+    {
+        var (client, _) = MakeRw(NoGet, (m, u, b) => Resp.Json(200, new { }));
+        using (client)
+        {
+            await Assert.ThrowsAsync<ConfigException>(() =>
+                client.CreateDocumentAsync(name: "x", payloadKind: "json",
+                    kind: "invalid", jsonValue: new { a = 1 }));
+        }
+    }
+
+    [Fact]
     public async Task CreateDocumentFileBroadcastUploadsRawBytes()
     {
         var (client, transport) = MakeRw(NoGet, (method, url, body) =>

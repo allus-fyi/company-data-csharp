@@ -335,6 +335,51 @@ public class ModelTests
     }
 
     [Fact]
+    public void ChangeDocumentStatusChangedCarriesAction()
+    {
+        using var key = Vector.PrivateKey();
+        var body = Obj(new()
+        {
+            ["changes"] = Node.List(new List<Node>
+            {
+                Obj(new()
+                {
+                    ["id"] = S("chg-sign"), ["event"] = S("document_status_changed"),
+                    ["person_user_id"] = S("u-2"), ["action"] = S("signed"),
+                    ["document_id"] = S("doc-7"), ["status"] = S("active"),
+                    ["at"] = S("2026-06-22T10:00:00Z"),
+                }),
+            }),
+        });
+        var chg = Change.ListFromApi(body, _ => null, DecryptWith(key))[0];
+        Assert.Equal("document_status_changed", chg.Event);
+        Assert.Equal("signed", chg.Action);
+        Assert.Equal("doc-7", chg.DocumentId);
+        Assert.Equal("active", chg.Status);
+        Assert.Null(chg.Slug);
+    }
+
+    [Fact]
+    public void DocumentModelCarriesContractFlagsAndSignatures()
+    {
+        var doc = Document.FromApi(Obj(new()
+        {
+            ["id"] = S("c1"), ["kind"] = S("agreement"), ["name"] = S("Agreement"), ["status"] = S("active"),
+            ["payload_kind"] = S("json"), ["is_private"] = S(false),
+            ["value"] = Obj(new() { ["v"] = S(1L) }), ["metadata"] = Obj(new()),
+            ["requires_signature"] = S(true), ["requires_acceptance"] = S(false),
+            ["signatures"] = Node.List(new List<Node>
+            {
+                Obj(new() { ["action"] = S("signed"), ["method"] = S("biometric") }),
+            }),
+        }));
+        Assert.True(doc.RequiresSignature);
+        Assert.False(doc.RequiresAcceptance);
+        Assert.NotNull(doc.Signatures);
+        Assert.Single(doc.Signatures!);
+    }
+
+    [Fact]
     public void DocumentModelBroadcastJsonIsPlaintext()
     {
         var doc = Document.FromApi(Obj(new()
