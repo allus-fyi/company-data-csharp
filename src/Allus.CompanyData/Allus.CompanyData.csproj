@@ -22,7 +22,7 @@
   <!-- NuGet package metadata. `dotnet pack` produces the .nupkg. -->
   <PropertyGroup>
     <PackageId>Allus.CompanyData</PackageId>
-    <Version>0.0.4</Version>
+    <Version>0.0.5</Version>
     <Authors>allus</Authors>
     <Company>allme.fyi</Company>
     <Product>allus company-data SDK</Product>

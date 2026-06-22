@@ -19,8 +19,8 @@ the request slots you configured.
 **Contents:** [TL;DR — fetch new updates](#tldr--fetch-new-updates) ·
 [Quickstart](#quickstart) · [Every call](#every-call) ·
 [The typed value model](#the-typed-value-model) ·
-[The changes pump](#the-changes-pump) · [Webhooks](#webhooks) ·
-[Rate limits](#rate-limits) · [Errors](#errors) ·
+[The changes pump](#the-changes-pump) · [Company documents](#company-documents) ·
+[Webhooks](#webhooks) · [Rate limits](#rate-limits) · [Errors](#errors) ·
 [How it's wired](#how-its-wired)
 
 Deeper reference pages live in [`docs/`](docs/):
@@ -499,6 +499,141 @@ If a handler keeps failing, the event lands in the dead-letter store instead of
 blocking the stream; inspect with `client.DeadLetters()` and re-drive with
 `client.RetryDeadLettersAsync(Handle)` after fixing the cause. See
 [`docs/pump.md`](docs/pump.md).
+
+---
+
+## Company documents
+
+Beyond the inbound request-field values, your service can push **documents** out to
+the people it's connected to — a contract to sign, an offer, a generated PDF, a
+JSON record. A document targets either **one person** (per-person) or **everyone**
+(broadcast), and the SDK handles the encryption for you.
+
+### The one rule that matters
+
+**Every per-person document is automatically end-to-end encrypted to the
+recipient's public key. Broadcast documents are sent in plaintext.** Encryption is
+decided purely by the *target*, never by you:
+
+| Target | Encryption |
+|--------|-----------|
+| **per-person** (`connectionId`, `personUserId`, or `shareCode` given) | **always encrypted** to that recipient's key — for *every* per-person doc, regardless of `isPrivate` |
+| **broadcast** (no target) | **plaintext** (a plaintext value can't be locked) |
+
+`isPrivate` is **device-display-only** — it controls how the recipient's app shows
+the value (a lock-and-tap-to-reveal field vs decrypt-on-load), nothing about the
+wire encryption. Because a broadcast value is plaintext and therefore can't be
+locked, **`isPrivate=true` requires a per-person target** (passing it on a
+broadcast throws `ConfigException`).
+
+No method ever takes a key, passphrase, or secret argument — the recipient's
+public key is resolved from the target's `share_code` (fetched + cached for you),
+and decryption of anything you read back uses your in-memory service key.
+
+`payloadKind` selects the body shape:
+
+* `"json"` — a structured object you pass as `jsonValue`.
+* `"file"` — raw bytes you pass as `fileBytes` (+ a `fileMime`).
+
+### Create a document
+
+```csharp
+using Allus.CompanyData;
+
+using var client = Client.FromConfig("allus.json");
+
+// BROADCAST — a plaintext JSON document delivered to every connection.
+// (No target → plaintext; isPrivate must stay false here.)
+var notice = await client.CreateDocumentAsync(
+    name:        "2026 Terms of Service",
+    payloadKind: "json",
+    kind:        "document",
+    jsonValue:   new { version = "2026.1", url = "https://acme.example/tos" });
+
+// PER-PERSON — automatically end-to-end encrypted to the recipient's key.
+// Identify the target by connectionId, personUserId, or shareCode (any one).
+// isPrivate=true is allowed here (per-person target) and makes the recipient's
+// app show it as a lock-to-reveal field — the wire encryption happens regardless.
+var contract = await client.CreateDocumentAsync(
+    name:         "Service agreement — Alice",
+    payloadKind:  "json",
+    kind:         "legal_document",
+    isPrivate:    true,
+    connectionId: "019xxxxxxxxxxxxxxxxxxxxxxxxx",   // or personUserId: "…" / shareCode: "ABC123"
+    jsonValue:    new { plan = "pro", signed = false },
+    status:       "ready_to_sign");
+
+// PER-PERSON FILE — the bytes are encrypted to the recipient before upload.
+byte[] pdf = await File.ReadAllBytesAsync("/tmp/agreement.pdf");
+var signed = await client.CreateDocumentAsync(
+    name:         "Signed agreement — Alice",
+    payloadKind:  "file",
+    kind:         "document",
+    personUserId: "019yyyyyyyyyyyyyyyyyyyyyyyyy",
+    fileBytes:    pdf,
+    fileMime:     "application/pdf");
+
+Console.WriteLine($"{contract.Id} {contract.Status} (private={contract.IsPrivate})");
+```
+
+`CreateDocumentAsync` returns a `Document(Id, Kind, Name, Description, Status,
+PayloadKind, IsPrivate, ValueObj, Metadata, CreatedAt, UpdatedAt)`. For a
+`payload_kind="json"` document, call `doc.Json()` to get the plaintext object back
+(a per-person doc is decrypted with your service key transparently; a broadcast doc
+is already plaintext).
+
+### List, fetch, update, delete
+
+```csharp
+// List this service's documents (paged; optional person / status filter).
+var docs = await client.ListDocumentsAsync(status: "ready_to_sign", limit: 50);
+foreach (var d in docs)
+    Console.WriteLine($"{d.Id} {d.Name} [{d.Status}]");
+
+// Fetch one by id.
+var doc = await client.GetDocumentAsync(contract.Id!);
+
+// Advance its lifecycle status.
+await client.UpdateDocumentStatusAsync(contract.Id!,
+    "active");   // offering | ready_to_sign | active | active_but_ending | ended
+
+// Update metadata / name / description (any subset).
+await client.UpdateDocumentMetadataAsync(contract.Id!,
+    name: "Service agreement — Alice (v2)",
+    metadata: new { revision = 2 });
+
+// Delete the document (and its on-disk file).
+await client.DeleteDocumentAsync(contract.Id!);
+```
+
+### Reacting to status changes in the pump / webhook
+
+When a recipient acts on a document (e.g. signs it), the platform emits a
+**`document_status_changed`** change event. It carries `Change.DocumentId` and
+`Change.Status` (no slot/slug/value), so handle it alongside the field events:
+
+```csharp
+async Task Handle(Change change)
+{
+    if (Seen(change.Id)) return;                 // idempotent — dedup on the stable id
+    switch (change.Event)
+    {
+        case "document_status_changed":
+            await OnDocumentStatus(change.DocumentId, change.Status);   // e.g. "active"
+            break;
+        case "field_updated":
+            await Store(change.PersonId, change.Slug, change.ValueObj);
+            break;
+        // … connection_created / connection_deleted / field_deleted / consent_* …
+    }
+    RecordSeen(change.Id);
+}
+
+await client.ProcessChangesAsync(Handle);
+```
+
+The same event arrives over [webhooks](#webhooks) with the identical shape — read
+`change.DocumentId` / `change.Status` either way.
 
 ---
 
