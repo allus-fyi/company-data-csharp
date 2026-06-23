@@ -411,6 +411,97 @@ public sealed record Document(
     }
 }
 
+/// <summary>
+/// A contract-flow run (company-data side). The company is one of the two bound parties.
+/// <see cref="Bindings"/> maps each party key to the bound user_id (the company's own is
+/// <see cref="CompanyUserId"/>); <see cref="Answers"/> are the per-party encrypted answer copies
+/// (the company reads the rows whose <c>for_user_id == CompanyUserId</c>, decryptable with the
+/// service private key); <see cref="Definition"/> is the pinned flow-version graph.
+/// </summary>
+public sealed record FlowRun(
+    string? Id,
+    string? FlowId,
+    object? FlowVersion,
+    string? ServiceId,
+    string? ConnectionId,
+    string? CompanyUserId,
+    IReadOnlyDictionary<string, string> Bindings,
+    string? Status,
+    string? CurrentNode,
+    string? DocumentId,
+    string? OutputMode,
+    Node Definition,
+    IReadOnlyList<Node> Answers,
+    DateTimeOffset? CreatedAt,
+    DateTimeOffset? UpdatedAt)
+{
+    /// <summary>The underlying hardened API object (escape hatch).</summary>
+    public object? Raw { get; init; }
+
+    /// <summary>The party key the company is bound to (Bindings[key] == CompanyUserId).</summary>
+    public string? CompanyPartyKey
+    {
+        get
+        {
+            foreach (var (key, uid) in Bindings)
+                if (uid == CompanyUserId) return key;
+            return null;
+        }
+    }
+
+    /// <summary>The company's bound user_id — its answer copies use this for_user_id.</summary>
+    public string? ServiceUserId => CompanyUserId;
+
+    public static FlowRun FromApi(Node obj)
+    {
+        var defNode = obj.Get("definition");
+        Node definition;
+        if (defNode.Kind == NodeKind.Object)
+        {
+            definition = defNode;
+        }
+        else
+        {
+            definition = Node.Object(new Dictionary<string, Node>
+            {
+                ["nodes"] = obj.Get("nodes"),
+                ["edges"] = obj.Get("edges"),
+                ["parties"] = obj.Get("parties"),
+                ["output_mode"] = obj.Get("output_mode"),
+            });
+        }
+        var bindings = new Dictionary<string, string>();
+        if (obj.Get("bindings").Kind == NodeKind.Object)
+            foreach (var (k, v) in obj.Get("bindings").AsObject())
+                bindings[k] = v.AsString() ?? "";
+        var answers = obj.Get("answers").Kind == NodeKind.List
+            ? obj.Get("answers").AsList().Where(a => a.Kind == NodeKind.Object).ToList()
+            : new List<Node>();
+        var outputMode = obj.Get("output_mode").AsString();
+        if (string.IsNullOrEmpty(outputMode))
+            outputMode = definition.Get("output_mode").AsString();
+        return new FlowRun(
+            Id: obj.Get("id").AsString(),
+            FlowId: obj.Get("flow_id").AsString(),
+            FlowVersion: obj.Has("flow_version") ? obj.Get("flow_version").ToObjectGraph() : null,
+            ServiceId: obj.Get("service_id").AsString(),
+            ConnectionId: obj.Get("connection_id").AsString(),
+            CompanyUserId: obj.Get("company_user_id").AsString(),
+            Bindings: bindings,
+            Status: obj.Get("status").AsString(),
+            CurrentNode: obj.Get("current_node").AsString(),
+            DocumentId: obj.Get("document_id").AsString(),
+            OutputMode: outputMode,
+            Definition: definition,
+            Answers: answers,
+            CreatedAt: ModelCoerce.ParseIsoDt(obj.Get("created_at").AsString()),
+            UpdatedAt: ModelCoerce.ParseIsoDt(obj.Get("updated_at").AsString()))
+        {
+            Raw = obj.ToObjectGraph(),
+        };
+    }
+}
+
 /// <summary>A service activity-log entry — ops events only, never person data.</summary>
 public sealed record LogEntry(
     string? Type,
