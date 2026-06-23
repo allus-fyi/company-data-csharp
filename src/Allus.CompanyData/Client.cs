@@ -40,6 +40,7 @@ public sealed class Client : IDisposable
     private const string RequestFieldsPath = Base + "/request-fields";
     private const string LogsPath = Base + "/logs";
     private const string DocumentsPath = Base + "/documents";
+    private const string ConnectRequestsPath = Base + "/connect-requests";
     private const string FlowsPath = Base + "/flows";        // POST /api/company-data/flows/{flowId}/runs
     private const string FlowRunsPath = Base + "/flow-runs"; // list / get / answers / generate
     private const string KeysPath = "/api/keys";
@@ -562,6 +563,27 @@ public sealed class Client : IDisposable
     public async Task DeleteDocumentAsync(string documentId, CancellationToken ct = default)
     {
         await _http.DeleteAsync($"{DocumentsPath}/{documentId}", ct).ConfigureAwait(false);
+    }
+
+    // ── connect requests (service-initiated; idea 2) ────────────────────────────
+
+    /// <summary>
+    /// Invite a person (by their share code) to connect to THIS service. Wraps
+    /// <c>POST /api/company-data/connect-requests</c> — auto-scoped to the calling client's service.
+    /// Fire-and-forget: the person accepts or rejects, and the outcome reaches you only via the
+    /// change feed / webhooks (<c>connection_request_accepted</c> / <c>connection_request_rejected</c>).
+    /// No crypto, no key handling (the request carries no values). Returns the new request_id.
+    /// </summary>
+    public async Task<string> SendConnectRequestAsync(string shareCode, CancellationToken ct = default)
+    {
+        var code = (shareCode ?? "").Trim();
+        if (code.Length == 0) throw new ConfigException("shareCode is required");
+        var body = await _http.PostAsync(ConnectRequestsPath,
+            jsonBody: new Dictionary<string, object?> { ["share_code"] = code }, ct: ct).ConfigureAwait(false);
+        var rid = body.Get("request_id").AsString();
+        if (string.IsNullOrEmpty(rid))
+            throw new ApiException(0, "company_connections.request_failed", "no request_id in response");
+        return rid!;
     }
 
     // ── contract-flow runs (company side — the company is a bound party) ─────────────────────────

@@ -572,4 +572,45 @@ public sealed class ClientTests : IDisposable
             Assert.Contains(("DELETE", "/documents/d9"), verbs);
         }
     }
+
+    // ── connect requests (service-initiated; idea 2) ────────────────────────────
+
+    [Fact]
+    public async Task SendConnectRequestPostsShareCodeAndReturnsRequestId()
+    {
+        JsonElement captured = default;
+        var (client, _) = MakeRw(NoGet, (method, url, body) =>
+        {
+            Assert.Equal("POST", method);
+            Assert.EndsWith("/company-data/connect-requests", url);
+            captured = ParseBody(body);
+            return Resp.Json(201, new { request_id = "req-1" });
+        });
+        using (client)
+        {
+            var rid = await client.SendConnectRequestAsync("  ABC123 ");
+            Assert.Equal("req-1", rid);
+            Assert.Equal("ABC123", captured.GetProperty("share_code").GetString()); // trimmed
+        }
+    }
+
+    [Fact]
+    public async Task SendConnectRequestBlankThrowsConfigException()
+    {
+        var (client, _) = MakeRw(NoGet, (m, u, b) => Resp.Json(200, new { }));
+        using (client)
+        {
+            await Assert.ThrowsAsync<ConfigException>(() => client.SendConnectRequestAsync("   "));
+        }
+    }
+
+    [Fact]
+    public async Task SendConnectRequestMissingIdThrowsApiException()
+    {
+        var (client, _) = MakeRw(NoGet, (m, u, b) => Resp.Json(201, new { }));
+        using (client)
+        {
+            await Assert.ThrowsAsync<ApiException>(() => client.SendConnectRequestAsync("ABC123"));
+        }
+    }
 }
