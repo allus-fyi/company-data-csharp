@@ -40,6 +40,8 @@ public sealed class Client : IDisposable
     private const string RequestFieldsPath = Base + "/request-fields";
     private const string LogsPath = Base + "/logs";
     private const string DocumentsPath = Base + "/documents";
+    private const string FlowsPath = Base + "/flows";        // POST /api/company-data/flows/{flowId}/runs
+    private const string FlowRunsPath = Base + "/flow-runs"; // list / get / answers / generate
     private const string KeysPath = "/api/keys";
 
     // Default page size for the connections iterator (heavily rate-limited).
@@ -66,6 +68,9 @@ public sealed class Client : IDisposable
     // Recipient RSA public keys (by share_code) — cached for per-person document encryption. A
     // public key is immutable + not a secret (fetched live, never configured).
     private readonly Dictionary<string, RSA> _pubkeyCache = new();
+
+    // The service RSA public key (public half of the loaded private key), derived once.
+    private RSA? _servicePublicKey;
 
     public Client(
         Config config,
@@ -559,6 +564,216 @@ public sealed class Client : IDisposable
         await _http.DeleteAsync($"{DocumentsPath}/{documentId}", ct).ConfigureAwait(false);
     }
 
+    // ── contract-flow runs (company side — the company is a bound party) ─────────────────────────
+
+    /// <summary>
+    /// Start a run for a connection. <paramref name="bindings"/> = {party_key: user_id} covering the
+    /// flow's parties (each bound user must be the company or the connected person). Pins the flow's
+    /// latest PUBLISHED version. <paramref name="connectionId"/> is the person-side
+    /// company_service_connections.id for this service. Returns the created
+    /// <see cref="FlowRun"/> (status awaiting_&lt;entry node's party&gt;).
+    /// </summary>
+    public async Task<FlowRun> TriggerFlowRunAsync(
+        string flowId, string connectionId, IReadOnlyDictionary<string, string> bindings,
+        CancellationToken ct = default)
+    {
+        var body = new Dictionary<string, object?>
+        {
+            ["target"] = new Dictionary<string, object?> { ["connection_id"] = connectionId },
+            ["bindings"] = bindings,
+        };
+        var created = await _http.PostAsync($"{FlowsPath}/{flowId}/runs", jsonBody: body, ct: ct).ConfigureAwait(false);
+        return FlowRun.FromApi(created);
+    }
+
+    /// <summary>
+    /// List this service's runs. An empty/null <paramref name="status"/> defaults to the actionable
+    /// "awaiting_company" queue; pass "*" for the unfiltered list, or any status filter.
+    /// </summary>
+    public async Task<IReadOnlyList<FlowRun>> FlowRunsAsync(string? status = "awaiting_company", CancellationToken ct = default)
+    {
+        Dictionary<string, string>? query = null;
+        if (!string.IsNullOrEmpty(status) && status != "*")
+            query = new Dictionary<string, string> { ["status"] = status! };
+        var body = await _http.GetAsync(FlowRunsPath, query, ct).ConfigureAwait(false);
+        return ListItems(body).Select(FlowRun.FromApi).ToList();
+    }
+
+    /// <summary>Fetch one run by id → <see cref="FlowRun"/>.</summary>
+    public async Task<FlowRun> FlowRunAsync(string runId, CancellationToken ct = default)
+    {
+        var body = await _http.GetAsync($"{FlowRunsPath}/{runId}", ct: ct).ConfigureAwait(false);
+        return FlowRun.FromApi(body);
+    }
+
+    /// <summary>
+    /// The service RSA public key = the public half of the loaded service private key. The run payload
+    /// does NOT carry the service public key; the company makes its own answer copy by encrypting to
+    /// the public half of the same RSA pair it already holds (config-only key handling — no fetch).
+    /// </summary>
+    private RSA ServicePublicKey()
+    {
+        if (_servicePublicKey is null)
+        {
+            var pub = RSA.Create();
+            pub.ImportParameters(_privateKey.ExportParameters(false));
+            _servicePublicKey = pub;
+        }
+        return _servicePublicKey;
+    }
+
+    /// <summary>
+    /// Decrypt the company's service-key answer copies → {slug: plaintext}. Only the rows whose
+    /// for_user_id is the company's bound user_id are decryptable with the service private key.
+    /// </summary>
+    private Dictionary<string, object?> DecryptRunAnswers(FlowRun run)
+    {
+        var serviceUid = run.ServiceUserId;
+        var outMap = new Dictionary<string, object?>();
+        foreach (var row in run.Answers)
+        {
+            if (row.Get("for_user_id").AsString() != serviceUid) continue;
+            var slug = row.Get("slug").AsString();
+            if (string.IsNullOrEmpty(slug) || !row.Has("value")) continue;
+            outMap[slug!] = DecryptValueImpl(row.Get("value"));
+        }
+        return outMap;
+    }
+
+    /// <summary>
+    /// Resolve a person party's RSA public key for per-party answer encryption. Prefers a
+    /// caller-supplied key, else resolves the person's share_code from the run's connection →
+    /// GET /api/keys/{code}.
+    ///
+    /// Integration gap: the run payload exposes neither person public keys nor per-binding share
+    /// codes, so the SDK resolves via the connection. Supply <paramref name="partyPubKeys"/> to skip.
+    /// </summary>
+    private async Task<RSA> FlowPersonPublicKeyAsync(
+        FlowRun run, string uid, IReadOnlyDictionary<string, RSA> partyPubKeys, CancellationToken ct)
+    {
+        if (partyPubKeys.TryGetValue(uid, out var supplied)) return supplied;
+        var sc = await ResolveShareCodeAsync(run.ConnectionId, uid, ct).ConfigureAwait(false);
+        return await RecipientPublicKeyAsync(sc, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Fill the company's current node and advance. <paramref name="fill"/> = {slug: plaintext_value}
+    /// the caller computed for this node. For EACH answer the SDK encrypts one copy per bound party
+    /// (the company via the service public key; each person party via their public key), evaluates the
+    /// next node LOCALLY (ordered outgoing edges, first match) over the full decrypted answer map, and
+    /// POSTs {answers, next_node?/leaf, next_party?}. Returns the refreshed <see cref="FlowRun"/>. A
+    /// document-mode leaf leaves the run "generating" — call <see cref="GenerateFlowDocumentAsync"/>
+    /// (or <see cref="ProcessFlowRunAsync"/>, which chains it). <paramref name="partyPubKeys"/> may be
+    /// null; supply it to skip the share_code → /api/keys resolution for person parties.
+    /// </summary>
+    public async Task<FlowRun> SubmitFlowAnswersAsync(
+        FlowRun run, IReadOnlyDictionary<string, object?> fill,
+        IReadOnlyDictionary<string, RSA>? partyPubKeys = null, CancellationToken ct = default)
+    {
+        partyPubKeys ??= new Dictionary<string, RSA>();
+        var answersSoFar = DecryptRunAnswers(run);
+        var full = new Dictionary<string, object?>(answersSoFar);
+        foreach (var (k, v) in fill) full[k] = v;
+        var svcPub = ServicePublicKey();
+
+        var answersOut = new List<object?>();
+        foreach (var (slug, val) in fill)
+        {
+            var plain = val is string s ? s : JsonSerializer.Serialize(val);
+            var values = new List<object?>();
+            foreach (var uid in run.Bindings.Values)
+            {
+                var key = uid == run.ServiceUserId
+                    ? svcPub
+                    : await FlowPersonPublicKeyAsync(run, uid, partyPubKeys, ct).ConfigureAwait(false);
+                values.Add(new Dictionary<string, object?>
+                {
+                    ["for_user_id"] = uid,
+                    ["value"] = Crypto.EncryptForPublicKey(plain, key).ToObjectGraph(),
+                });
+            }
+            answersOut.Add(new Dictionary<string, object?> { ["slug"] = slug, ["values"] = values });
+        }
+
+        var (leaf, nextNode) = ComputeNextNode(run.Definition, run.CurrentNode, full);
+        var body = new Dictionary<string, object?> { ["answers"] = answersOut };
+        if (leaf)
+        {
+            body["leaf"] = true;
+        }
+        else
+        {
+            body["next_node"] = nextNode;
+            body["next_party"] = PartyOf(run.Definition, nextNode);
+        }
+        var res = await _http.PostAsync($"{FlowRunsPath}/{run.Id}/answers", jsonBody: body, ct: ct).ConfigureAwait(false);
+        return FlowRun.FromApi(res);
+    }
+
+    /// <summary>
+    /// Document-mode company leaf: one-time-key value gather → POST /generate. Builds a random 32-byte
+    /// AES-256-GCM key, encrypts JSON({slug: plaintext}) of the company's decrypted answers, packs
+    /// iv(12)||ciphertext||tag(16), and POSTs {otk: base64(key), values: base64(blob)}. Returns the
+    /// API response Node {document_id, status: "awaiting_signature"} (idempotent).
+    /// </summary>
+    public async Task<Node> GenerateFlowDocumentAsync(FlowRun run, CancellationToken ct = default)
+    {
+        var answers = DecryptRunAnswers(run);
+        var strMap = answers.ToDictionary(
+            kv => kv.Key, kv => kv.Value is string s ? s : JsonSerializer.Serialize(kv.Value));
+        var payload = System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(strMap));
+        var otk = RandomNumberGenerator.GetBytes(32);
+        var iv = RandomNumberGenerator.GetBytes(12);
+        var ciphertext = new byte[payload.Length];
+        var tag = new byte[16];
+        using (var aes = new AesGcm(otk, 16))
+            aes.Encrypt(iv, payload, ciphertext, tag);
+        var blob = new byte[12 + ciphertext.Length + 16]; // iv(12) || ciphertext || tag(16)
+        Buffer.BlockCopy(iv, 0, blob, 0, 12);
+        Buffer.BlockCopy(ciphertext, 0, blob, 12, ciphertext.Length);
+        Buffer.BlockCopy(tag, 0, blob, 12 + ciphertext.Length, 16);
+        var body = new Dictionary<string, object?>
+        {
+            ["otk"] = Convert.ToBase64String(otk),
+            ["values"] = Convert.ToBase64String(blob),
+        };
+        return await _http.PostAsync($"{FlowRunsPath}/{run.Id}/generate", jsonBody: body, ct: ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// High-level company turn: load → (if our turn) fill + advance + generate.
+    /// <paramref name="fillNode"/>(node, answers) returns {slug: value}; the SDK encrypts per party,
+    /// submits, and — if the submit landed on a document-mode leaf — calls
+    /// <see cref="GenerateFlowDocumentAsync"/>. Returns the latest <see cref="FlowRun"/>; when the run
+    /// is not awaiting the company it is returned untouched.
+    /// </summary>
+    public async Task<FlowRun> ProcessFlowRunAsync(
+        string runId,
+        Func<Node, IReadOnlyDictionary<string, object?>, IReadOnlyDictionary<string, object?>?> fillNode,
+        IReadOnlyDictionary<string, RSA>? partyPubKeys = null,
+        CancellationToken ct = default)
+    {
+        var run = await FlowRunAsync(runId, ct).ConfigureAwait(false);
+        var companyParty = run.CompanyPartyKey;
+        if (companyParty is null || run.Status != $"awaiting_{companyParty}")
+            return run; // not our turn (or company not bound)
+        var node = NodeByKey(run.Definition, run.CurrentNode);
+        if (node is null) return run;
+        var answers = DecryptRunAnswers(run);
+        var fill = fillNode(node, answers) ?? new Dictionary<string, object?>();
+        var merged = new Dictionary<string, object?>(answers);
+        foreach (var (k, v) in fill) merged[k] = v;
+        var (wasLeaf, _) = ComputeNextNode(run.Definition, run.CurrentNode, merged);
+        run = await SubmitFlowAnswersAsync(run, fill, partyPubKeys, ct).ConfigureAwait(false);
+        var mode = run.OutputMode ?? run.Definition.Get("output_mode").AsString();
+        if (wasLeaf && mode == "document")
+        {
+            await GenerateFlowDocumentAsync(run, ct).ConfigureAwait(false);
+            run = await FlowRunAsync(run.Id!, ct).ConfigureAwait(false);
+        }
+        return run;
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────────────
 
     private static RSA LoadServiceKey(Config config)
@@ -601,6 +816,54 @@ public sealed class Client : IDisposable
         return Node.Object(new Dictionary<string, Node>());
     }
 
+    /// <summary>Look up a node by key in the pinned definition graph.</summary>
+    private static Node? NodeByKey(Node definition, string? key)
+    {
+        if (definition.Get("nodes").Kind != NodeKind.List) return null;
+        foreach (var n in definition.Get("nodes").AsList())
+            if (n.Kind == NodeKind.Object && n.Get("key").AsString() == key) return n;
+        return null;
+    }
+
+    /// <summary>
+    /// The next node after <paramref name="fromKey"/> — ordered outgoing edges, first match wins.
+    /// Leaf is true when there is no outgoing edge or none matched (a dead-end is a leaf).
+    /// </summary>
+    private static (bool Leaf, string? Next) ComputeNextNode(
+        Node definition, string? fromKey, IReadOnlyDictionary<string, object?> answers)
+    {
+        var edges = (definition.Get("edges").Kind == NodeKind.List ? definition.Get("edges").AsList() : new List<Node>())
+            .Where(e => e.Kind == NodeKind.Object && e.Get("from").AsString() == fromKey)
+            .OrderBy(e => EdgeSort(e))
+            .ToList();
+        if (edges.Count == 0) return (true, null);
+        foreach (var e in edges)
+            if (FlowCondition.Evaluate(e.Get("condition"), answers))
+                return (false, e.Get("to").AsString());
+        return (true, null);
+    }
+
+    private static double EdgeSort(Node edge)
+    {
+        var s = edge.Get("sort").RawScalar;
+        return s switch
+        {
+            long l => l,
+            double d => d,
+            int i => i,
+            string str when double.TryParse(str, System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var n) => n,
+            _ => 0,
+        };
+    }
+
+    /// <summary>The party that owns <paramref name="nodeKey"/> in the definition.</summary>
+    private static string? PartyOf(Node definition, string? nodeKey)
+    {
+        var node = NodeByKey(definition, nodeKey);
+        return node?.Get("party").AsString();
+    }
+
     /// <summary>Build a <c>data:&lt;mime&gt;;base64,&lt;…&gt;</c> URI for the per-person file envelope.</summary>
     private static string DataUri(byte[] fileBytes, string? mime) =>
         $"data:{mime ?? "application/octet-stream"};base64,{Convert.ToBase64String(fileBytes)}";
@@ -621,6 +884,7 @@ public sealed class Client : IDisposable
         _disposed = true;
         _privateKey.Dispose();
         _accountKey?.Dispose();
+        _servicePublicKey?.Dispose();
         foreach (var key in _pubkeyCache.Values) key.Dispose();
     }
 }
