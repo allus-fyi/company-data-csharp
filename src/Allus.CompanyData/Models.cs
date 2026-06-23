@@ -252,6 +252,7 @@ public sealed record Change(
     string? DocumentId = null,  // set on document_status_changed
     string? Status = null,      // set on document_status_changed
     string? Action = null,      // set on document_status_changed for a contract: signed | accepted | cancelled
+    string? RequestId = null,   // set on connection_request_accepted | connection_request_rejected
     DateTimeOffset? At = null)
 {
     /// <summary>The underlying hardened API object (escape hatch).</summary>
@@ -286,6 +287,8 @@ public sealed record Change(
             DocumentId: obj.Get("document_id").AsString(),
             Status: ev == "document_status_changed" ? obj.Get("status").AsString() : null,
             Action: ev == "document_status_changed" ? obj.Get("action").AsString() : null,
+            RequestId: ev is "connection_request_accepted" or "connection_request_rejected"
+                ? obj.Get("request_id").AsString() : null,
             At: ModelCoerce.ParseIsoDt(obj.Get("at").AsString()))
         {
             Raw = obj.ToObjectGraph(),

@@ -360,6 +360,47 @@ public class ModelTests
     }
 
     [Fact]
+    public void ChangeConnectRequestOutcomeEventsCarryRequestId()
+    {
+        using var key = Vector.PrivateKey();
+        var body = Obj(new()
+        {
+            ["changes"] = Node.List(new List<Node>
+            {
+                Obj(new()
+                {
+                    ["id"] = S("c1"), ["event"] = S("connection_request_accepted"),
+                    ["request_id"] = S("req-9"), ["person_user_id"] = S("person-1"),
+                    ["share_code"] = S("P1CODE"), ["at"] = S("2026-06-23T10:00:00Z"),
+                }),
+                Obj(new()
+                {
+                    ["id"] = S("c2"), ["event"] = S("connection_request_rejected"),
+                    ["request_id"] = S("req-8"), ["person_user_id"] = S("person-2"),
+                }),
+                Obj(new()
+                {
+                    ["id"] = S("c3"), ["event"] = S("connection_created"),
+                    ["person_user_id"] = S("person-3"),
+                }),
+            }),
+        });
+        var changes = Change.ListFromApi(body, _ => null, DecryptWith(key));
+
+        Assert.Equal("connection_request_accepted", changes[0].Event);
+        Assert.Equal("req-9", changes[0].RequestId);
+        Assert.Equal("person-1", changes[0].PersonId);
+        Assert.Equal("P1CODE", changes[0].ShareCode);
+        Assert.Null(changes[0].Slug);
+        Assert.Null(changes[0].ValueObj);
+
+        Assert.Equal("connection_request_rejected", changes[1].Event);
+        Assert.Equal("req-8", changes[1].RequestId);
+
+        Assert.Null(changes[2].RequestId); // unrelated event
+    }
+
+    [Fact]
     public void DocumentModelCarriesContractFlagsAndSignatures()
     {
         var doc = Document.FromApi(Obj(new()
