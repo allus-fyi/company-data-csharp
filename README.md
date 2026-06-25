@@ -591,7 +591,7 @@ foreach (var d in docs)
     Console.WriteLine($"{d.Id} {d.Name} [{d.Status}]");
 
 // Fetch one by id.
-var doc = await client.GetDocumentAsync(contract.Id!);
+var doc = await client.DocumentAsync(contract.Id!);
 
 // Advance its lifecycle status.
 await client.UpdateDocumentStatusAsync(contract.Id!,
