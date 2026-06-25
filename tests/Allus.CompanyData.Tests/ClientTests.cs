@@ -562,7 +562,7 @@ public sealed class ClientTests : IDisposable
         using (client)
         {
             Assert.Empty(await client.ListDocumentsAsync(status: "active"));
-            Assert.Equal("d9", (await client.GetDocumentAsync("d9")).Id);
+            Assert.Equal("d9", (await client.DocumentAsync("d9")).Id);
             await client.UpdateDocumentStatusAsync("d9", "ended");
             await client.UpdateDocumentMetadataAsync("d9", name: "renamed");
             await client.DeleteDocumentAsync("d9");

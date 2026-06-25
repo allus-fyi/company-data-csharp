@@ -351,7 +351,7 @@ public sealed class Client : IDisposable
     // ── company documents (write) ───────────────────────────────────────────────────────────────
 
     /// <summary>Fetch + cache the recipient RSA public key by share_code (GET /api/keys/{shareCode}).</summary>
-    public async Task<RSA> RecipientPublicKeyAsync(string shareCode, CancellationToken ct = default)
+    private async Task<RSA> RecipientPublicKeyAsync(string shareCode, CancellationToken ct = default)
     {
         if (_pubkeyCache.TryGetValue(shareCode, out var cached))
             return cached;
@@ -527,7 +527,7 @@ public sealed class Client : IDisposable
     }
 
     /// <summary>Fetch one document by id → <see cref="Document"/>.</summary>
-    public async Task<Document> GetDocumentAsync(string documentId, CancellationToken ct = default)
+    public async Task<Document> DocumentAsync(string documentId, CancellationToken ct = default)
     {
         var body = await _http.GetAsync($"{DocumentsPath}/{documentId}", ct: ct).ConfigureAwait(false);
         return Document.FromApi(DocObj(body), DecryptValueImpl);
