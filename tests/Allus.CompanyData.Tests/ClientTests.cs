@@ -476,7 +476,7 @@ public sealed class ClientTests : IDisposable
     }
 
     [Fact]
-    public async Task CreateDocumentFileBroadcastUploadsRawBytes()
+    public async Task CreateDocumentFileBroadcastUploadsFileDataUri()
     {
         var (client, transport) = MakeRw(NoGet, (method, url, body) =>
         {
@@ -500,13 +500,17 @@ public sealed class ClientTests : IDisposable
             // first POST has a JSON target=null body
             Assert.Equal(JsonValueKind.Null, ParseBody(transport.Writes[0].Body).GetProperty("target").ValueKind);
             Assert.EndsWith("/documents/f1/file", transport.Writes[1].Url);
-            Assert.Equal(raw, transport.Writes[1].Body); // raw plaintext bytes
-            Assert.Equal("application/pdf", transport.Writes[1].ContentType);
+            // JSON {"file": "data:application/pdf;base64,…", "original_name": "C"} (NOT raw bytes)
+            var fileBody = ParseBody(transport.Writes[1].Body);
+            Assert.Equal("C", fileBody.GetProperty("original_name").GetString());
+            var fileUri = fileBody.GetProperty("file").GetString()!;
+            Assert.StartsWith("data:application/pdf;base64,", fileUri);
+            Assert.Equal(raw, Convert.FromBase64String(fileUri.Split(',', 2)[1]));
         }
     }
 
     [Fact]
-    public async Task CreateDocumentFilePerPersonUploadsWrapperBytes()
+    public async Task CreateDocumentFilePerPersonUploadsValueWrapperString()
     {
         var spki = VectorPubSpkiB64();
         var (client, transport) = MakeRw(
@@ -530,8 +534,12 @@ public sealed class ClientTests : IDisposable
                 fileMime: "application/pdf", personUserId: "u1", shareCode: "ABC123", isPrivate: true);
             var upload = transport.Writes[1].Body;
             Assert.NotNull(upload);
-            var wrapper = ParseBody(upload);
-            Assert.Equal(1, wrapper.GetProperty("_enc").GetInt32()); // ciphertext wrapper bytes, not raw file
+            // body is {"value": "<wrapper-as-JSON-string>"}; value MUST be a string
+            var body = ParseBody(upload);
+            Assert.Equal(JsonValueKind.String, body.GetProperty("value").ValueKind);
+            using var wrapperDoc = JsonDocument.Parse(body.GetProperty("value").GetString()!);
+            var wrapper = wrapperDoc.RootElement;
+            Assert.Equal(1, wrapper.GetProperty("_enc").GetInt32()); // ciphertext wrapper, not raw file
             // decrypt → the {"file":"data:...base64,..."} envelope holding the original bytes
             using var priv = Vector.PrivateKey();
             var env = Crypto.Decrypt(Node.FromJson(wrapper), priv);

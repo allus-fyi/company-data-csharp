@@ -487,22 +487,27 @@ public sealed class Client : IDisposable
         if (perPerson)
         {
             // Encrypt the file bytes (EVERY per-person doc): wrap the file envelope string, then send
-            // the wrapper as bytes.
+            // {"value": "<wrapper-as-JSON-string>"} as application/json. The API requires value to be a
+            // STRING that JSON-decodes to the {"_enc":1,…} wrapper.
             var envelope = JsonSerializer.Serialize(new Dictionary<string, object?>
             {
                 ["file"] = DataUri(fileBytes, fileMime),
             });
             var wrapper = Crypto.EncryptForPublicKey(envelope, pubkey!);
             await _http.PostAsync($"{DocumentsPath}/{doc.Id}/file",
-                rawBody: System.Text.Encoding.UTF8.GetBytes(wrapper.ToJsonString()),
-                contentType: "application/json", ct: ct).ConfigureAwait(false);
+                jsonBody: new Dictionary<string, object?> { ["value"] = wrapper.ToJsonString() },
+                ct: ct).ConfigureAwait(false);
         }
         else
         {
-            // Broadcast — raw plaintext bytes.
+            // Broadcast — plaintext file data URI as application/json {"file": …, "original_name": …}.
             await _http.PostAsync($"{DocumentsPath}/{doc.Id}/file",
-                rawBody: fileBytes,
-                contentType: fileMime ?? "application/octet-stream", ct: ct).ConfigureAwait(false);
+                jsonBody: new Dictionary<string, object?>
+                {
+                    ["file"] = DataUri(fileBytes, fileMime),
+                    ["original_name"] = name,
+                },
+                ct: ct).ConfigureAwait(false);
         }
         return doc;
     }
