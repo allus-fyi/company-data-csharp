@@ -398,7 +398,10 @@ public sealed class Client : IDisposable
     /// <summary>
     /// Create a company document for a connection / person (PER-PERSON), or BROADCAST (no target).
     /// <c>payloadKind="json"</c> → <paramref name="jsonValue"/> (object). <c>payloadKind="file"</c> →
-    /// <paramref name="fileBytes"/> (+ <paramref name="fileMime"/>).
+    /// <paramref name="fileBytes"/> (+ <paramref name="fileMime"/>). For a broadcast file, the API
+    /// validates the <c>original_name</c> extension; pass <paramref name="fileName"/> to set it
+    /// explicitly, otherwise it is derived from <paramref name="fileMime"/> when <paramref name="name"/>
+    /// has no allowed extension.
     ///
     /// Encryption is decided by the TARGET, not by is_private:
     ///   PER-PERSON (connectionId/personUserId given) → the value is ALWAYS encrypted FOR THE
@@ -421,6 +424,7 @@ public sealed class Client : IDisposable
         object? jsonValue = null,
         byte[]? fileBytes = null,
         string? fileMime = null,
+        string? fileName = null,
         bool requiresSignature = false,
         bool requiresAcceptance = false,
         object? metadata = null,
@@ -505,7 +509,7 @@ public sealed class Client : IDisposable
                 jsonBody: new Dictionary<string, object?>
                 {
                     ["file"] = DataUri(fileBytes, fileMime),
-                    ["original_name"] = name,
+                    ["original_name"] = BroadcastOriginalName(fileName, name, fileMime),
                 },
                 ct: ct).ConfigureAwait(false);
         }
@@ -894,6 +898,43 @@ public sealed class Client : IDisposable
     /// <summary>Build a <c>data:&lt;mime&gt;;base64,&lt;…&gt;</c> URI for the per-person file envelope.</summary>
     private static string DataUri(byte[] fileBytes, string? mime) =>
         $"data:{mime ?? "application/octet-stream"};base64,{Convert.ToBase64String(fileBytes)}";
+
+    // Allowed broadcast-document MIME → file extension (mirrors the API's allowlist).
+    private static readonly Dictionary<string, string> MimeExt = new()
+    {
+        ["application/pdf"] = "pdf",
+        ["application/msword"] = "doc",
+        ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"] = "docx",
+        ["application/vnd.ms-excel"] = "xls",
+        ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] = "xlsx",
+        ["image/png"] = "png",
+        ["image/jpeg"] = "jpg",
+    };
+
+    private static readonly HashSet<string> AllowedDocExts = new()
+    {
+        "pdf", "doc", "docx", "xls", "xlsx", "png", "jpg", "jpeg",
+    };
+
+    /// <summary>
+    /// <c>original_name</c> for a broadcast file upload. The API validates its extension against an
+    /// allowlist, but <paramref name="name"/> is a human label that often has no extension. Use an
+    /// explicit <paramref name="fileName"/>; else keep <paramref name="name"/> if it already ends in
+    /// an allowed extension; else append the extension derived from <paramref name="fileMime"/> (so
+    /// <c>"Price list"</c> + <c>application/pdf</c> → <c>"Price list.pdf"</c>).
+    /// </summary>
+    private static string BroadcastOriginalName(string? fileName, string name, string? fileMime)
+    {
+        if (!string.IsNullOrEmpty(fileName))
+            return fileName;
+        var dot = name.LastIndexOf('.');
+        var ext = dot >= 0 ? name[(dot + 1)..].ToLowerInvariant() : "";
+        if (AllowedDocExts.Contains(ext))
+            return name;
+        return MimeExt.TryGetValue((fileMime ?? "").ToLowerInvariant(), out var derived)
+            ? $"{name}.{derived}"
+            : name;
+    }
 
     private static double ConnBackoff(double? retryAfter, int attempt)
     {
