@@ -357,6 +357,31 @@ public class ModelTests
         Assert.Equal("doc-7", chg.DocumentId);
         Assert.Equal("active", chg.Status);
         Assert.Null(chg.Slug);
+        Assert.Null(chg.Note);  // no note on a signed event
+    }
+
+    [Fact]
+    public void ChangeDocumentStatusChangedCarriesCancellationNote()
+    {
+        using var key = Vector.PrivateKey();
+        var body = Obj(new()
+        {
+            ["changes"] = Node.List(new List<Node>
+            {
+                Obj(new()
+                {
+                    ["id"] = S("chg-cancel"), ["event"] = S("document_status_changed"),
+                    ["person_user_id"] = S("u-3"), ["action"] = S("cancelled"),
+                    ["note"] = S("Too expensive"),
+                    ["document_id"] = S("doc-5"), ["status"] = S("ended"),
+                    ["at"] = S("2026-06-22T10:00:00Z"),
+                }),
+            }),
+        });
+        var chg = Change.ListFromApi(body, _ => null, DecryptWith(key))[0];
+        Assert.Equal("cancelled", chg.Action);
+        Assert.Equal("Too expensive", chg.Note);
+        Assert.Equal("ended", chg.Status);
     }
 
     [Fact]
