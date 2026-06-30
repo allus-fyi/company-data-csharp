@@ -441,6 +441,10 @@ public sealed class Client : IDisposable
             target = new Dictionary<string, object?> { ["connection_id"] = connectionId };
         else if (!string.IsNullOrEmpty(personUserId))
             target = new Dictionary<string, object?> { ["person_user_id"] = personUserId };
+        else if (!string.IsNullOrEmpty(shareCode))
+            // A share_code target is PER-PERSON (encrypted to that recipient), not a
+            // broadcast. Without this it fell through to the plaintext all-recipients path.
+            target = new Dictionary<string, object?> { ["share_code"] = shareCode };
         // (else: broadcast — target stays null)
 
         var perPerson = target is not null;
