@@ -500,13 +500,64 @@ public sealed class ClientTests : IDisposable
             // first POST has a JSON target=null body
             Assert.Equal(JsonValueKind.Null, ParseBody(transport.Writes[0].Body).GetProperty("target").ValueKind);
             Assert.EndsWith("/documents/f1/file", transport.Writes[1].Url);
-            // JSON {"file": "data:application/pdf;base64,…", "original_name": "C"} (NOT raw bytes)
+            // JSON {"file": "data:application/pdf;base64,…", "original_name": "C.pdf"} (NOT raw bytes).
+            // The extensionless human name "C" derives its extension from the MIME (application/pdf).
             var fileBody = ParseBody(transport.Writes[1].Body);
-            Assert.Equal("C", fileBody.GetProperty("original_name").GetString());
+            Assert.Equal("C.pdf", fileBody.GetProperty("original_name").GetString());
             var fileUri = fileBody.GetProperty("file").GetString()!;
             Assert.StartsWith("data:application/pdf;base64,", fileUri);
             Assert.Equal(raw, Convert.FromBase64String(fileUri.Split(',', 2)[1]));
         }
+    }
+
+    // Run a broadcast file CreateDocument and return the original_name sent on the /file upload.
+    private async Task<string?> BroadcastUploadOriginalNameAsync(
+        string name, string? fileMime, string? fileName = null)
+    {
+        var (client, transport) = MakeRw(NoGet, (method, url, body) =>
+        {
+            if (url.EndsWith("/documents"))
+                return Resp.Json(201, new
+                {
+                    id = "f1", kind = "document", name, description = (string?)null,
+                    status = "active", payload_kind = "file", is_private = false,
+                    value = new { _pending = true }, metadata = (object?)null,
+                    created_at = (string?)null, updated_at = (string?)null,
+                });
+            return Resp.Json(200, new { id = "f1" });
+        });
+        using (client)
+        {
+            await client.CreateDocumentAsync(name: name, payloadKind: "file",
+                fileBytes: System.Text.Encoding.UTF8.GetBytes("x"), fileMime: fileMime, fileName: fileName);
+            return ParseBody(transport.Writes[1].Body).GetProperty("original_name").GetString();
+        }
+    }
+
+    [Fact]
+    public async Task BroadcastOriginalNameKeepsAllowedExtension()
+    {
+        // A name that already ends in an allowed extension is left untouched (no "x.pdf.pdf").
+        Assert.Equal("Price list.pdf",
+            await BroadcastUploadOriginalNameAsync("Price list.pdf", "application/pdf"));
+    }
+
+    [Fact]
+    public async Task BroadcastOriginalNameDerivesExtensionFromMime()
+    {
+        // An extensionless human name gets the extension from the MIME type.
+        Assert.Equal("Price list.pdf",
+            await BroadcastUploadOriginalNameAsync("Price list", "application/pdf"));
+        Assert.Equal("Logo.jpg",
+            await BroadcastUploadOriginalNameAsync("Logo", "image/jpeg"));
+    }
+
+    [Fact]
+    public async Task BroadcastOriginalNameExplicitFileNameOverrides()
+    {
+        // An explicit fileName always wins, even over name's own extension and the MIME.
+        Assert.Equal("override.docx",
+            await BroadcastUploadOriginalNameAsync("Price list.pdf", "application/pdf", fileName: "override.docx"));
     }
 
     [Fact]
