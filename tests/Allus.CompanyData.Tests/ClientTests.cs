@@ -510,6 +510,38 @@ public sealed class ClientTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task CreateDocumentFileUploadFailureDeletesDanglingDoc()
+    {
+        // The metadata row is created first; if the /file upload then fails, the just-created
+        // (still {"_pending": true}) document must be best-effort DELETEd and the original error rethrown.
+        var (client, transport) = MakeRw(NoGet, (method, url, body) =>
+        {
+            if (method == "POST" && url.EndsWith("/documents"))
+                return Resp.Json(201, new
+                {
+                    id = "f9", kind = "document", name = "C", description = (string?)null,
+                    status = "active", payload_kind = "file", is_private = false,
+                    value = new { _pending = true }, metadata = (object?)null,
+                    created_at = (string?)null, updated_at = (string?)null,
+                });
+            if (method == "POST" && url.EndsWith("/documents/f9/file"))
+                return Resp.Json(500, new { error_key = "documents.upload_failed" }); // upload fails
+            if (method == "DELETE" && url.EndsWith("/documents/f9"))
+                return Resp.Json(200, new { }); // cleanup succeeds
+            throw new Xunit.Sdk.XunitException($"unexpected write {method} {url}");
+        });
+        using (client)
+        {
+            // the original upload error surfaces…
+            await Assert.ThrowsAsync<ApiException>(() =>
+                client.CreateDocumentAsync(name: "C", payloadKind: "file",
+                    fileBytes: System.Text.Encoding.UTF8.GetBytes("%PDF-1.4 x"), fileMime: "application/pdf"));
+            // …and the dangling metadata row was deleted.
+            Assert.Contains(transport.Writes, w => w.Method == "DELETE" && w.Url.EndsWith("/documents/f9"));
+        }
+    }
+
     // Run a broadcast file CreateDocument and return the original_name sent on the /file upload.
     private async Task<string?> BroadcastUploadOriginalNameAsync(
         string name, string? fileMime, string? fileName = null)

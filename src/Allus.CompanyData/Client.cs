@@ -488,30 +488,48 @@ public sealed class Client : IDisposable
             throw new ConfigException("fileBytes is required for payloadKind='file'");
         var createdFile = await _http.PostAsync(DocumentsPath, jsonBody: body, ct: ct).ConfigureAwait(false);
         var doc = Document.FromApi(DocObj(createdFile), DecryptValueImpl);
-        if (perPerson)
+        // The metadata row exists before the bytes are uploaded; if the upload fails, best-effort
+        // delete it so a failed CreateDocumentAsync leaves no dangling {"_pending": true} document.
+        // Cleanup errors are swallowed and the ORIGINAL upload error is re-thrown.
+        try
         {
-            // Encrypt the file bytes (EVERY per-person doc): wrap the file envelope string, then send
-            // {"value": "<wrapper-as-JSON-string>"} as application/json. The API requires value to be a
-            // STRING that JSON-decodes to the {"_enc":1,…} wrapper.
-            var envelope = JsonSerializer.Serialize(new Dictionary<string, object?>
+            if (perPerson)
             {
-                ["file"] = DataUri(fileBytes, fileMime),
-            });
-            var wrapper = Crypto.EncryptForPublicKey(envelope, pubkey!);
-            await _http.PostAsync($"{DocumentsPath}/{doc.Id}/file",
-                jsonBody: new Dictionary<string, object?> { ["value"] = wrapper.ToJsonString() },
-                ct: ct).ConfigureAwait(false);
-        }
-        else
-        {
-            // Broadcast — plaintext file data URI as application/json {"file": …, "original_name": …}.
-            await _http.PostAsync($"{DocumentsPath}/{doc.Id}/file",
-                jsonBody: new Dictionary<string, object?>
+                // Encrypt the file bytes (EVERY per-person doc): wrap the file envelope string, then send
+                // {"value": "<wrapper-as-JSON-string>"} as application/json. The API requires value to be a
+                // STRING that JSON-decodes to the {"_enc":1,…} wrapper.
+                var envelope = JsonSerializer.Serialize(new Dictionary<string, object?>
                 {
                     ["file"] = DataUri(fileBytes, fileMime),
-                    ["original_name"] = BroadcastOriginalName(fileName, name, fileMime),
-                },
-                ct: ct).ConfigureAwait(false);
+                });
+                var wrapper = Crypto.EncryptForPublicKey(envelope, pubkey!);
+                await _http.PostAsync($"{DocumentsPath}/{doc.Id}/file",
+                    jsonBody: new Dictionary<string, object?> { ["value"] = wrapper.ToJsonString() },
+                    ct: ct).ConfigureAwait(false);
+            }
+            else
+            {
+                // Broadcast — plaintext file data URI as application/json {"file": …, "original_name": …}.
+                await _http.PostAsync($"{DocumentsPath}/{doc.Id}/file",
+                    jsonBody: new Dictionary<string, object?>
+                    {
+                        ["file"] = DataUri(fileBytes, fileMime),
+                        ["original_name"] = BroadcastOriginalName(fileName, name, fileMime),
+                    },
+                    ct: ct).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            try
+            {
+                await DeleteDocumentAsync(doc.Id!, ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                // best-effort cleanup — swallow
+            }
+            throw;
         }
         return doc;
     }
