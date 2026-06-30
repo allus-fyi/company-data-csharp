@@ -440,6 +440,48 @@ public sealed class ClientTests : IDisposable
     }
 
     [Fact]
+    public async Task CreateDocumentShareCodeOnlyIsPerPersonEncrypted()
+    {
+        var spki = VectorPubSpkiB64();
+        var keysFetched = 0;
+        JsonElement captured = default;
+        var (client, _) = MakeRw(
+            (url, q) =>
+            {
+                Assert.EndsWith("/api/keys/ABC123", url); // recipient key fetched by share_code
+                keysFetched++;
+                return Resp.Json(200, new { public_key = spki });
+            },
+            (method, url, body) =>
+            {
+                captured = ParseBody(body);
+                return Resp.Json(201, new
+                {
+                    id = "d3", kind = "document", name = "SC", description = (string?)null,
+                    status = "active", payload_kind = "json", is_private = false,
+                    value = new { }, metadata = (object?)null,
+                    created_at = (string?)null, updated_at = (string?)null,
+                });
+            });
+        using (client)
+        {
+            var doc = await client.CreateDocumentAsync(name: "SC", payloadKind: "json",
+                jsonValue: new { plan = "pro" }, shareCode: "ABC123");
+            // (a) recipient key fetched via GET /api/keys/{shareCode}
+            Assert.Equal(1, keysFetched);
+            // (b) target is {"share_code": <code>} — per-person, NOT null/broadcast
+            var target = captured.GetProperty("target");
+            Assert.Equal(JsonValueKind.Object, target.ValueKind);
+            Assert.Equal("ABC123", target.GetProperty("share_code").GetString());
+            // (c) value is the encrypted wrapper (_enc == 1), not plaintext
+            var val = captured.GetProperty("value");
+            Assert.Equal(1, val.GetProperty("_enc").GetInt32());
+            Assert.False(val.TryGetProperty("plan", out _)); // not the plaintext object
+            Assert.Equal("d3", doc.Id);
+        }
+    }
+
+    [Fact]
     public async Task CreateDocumentPrivateBroadcastThrows()
     {
         var (client, _) = MakeRw(NoGet, (m, u, b) => Resp.Json(200, new { }));
