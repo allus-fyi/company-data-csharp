@@ -256,6 +256,7 @@ public sealed record Change(
     string? Method = null,        // set on a signature: biometric | twofa | email | custodian
     string? ContentSha256 = null, // set on a signature: SHA-256 of the signed content
     string? SignedAt = null,      // set on a signature: ISO timestamp the signature was recorded
+    string? CancelEffectiveDate = null, // set on a cancelled document_status_changed: ISO date the cancellation takes effect
     string? RequestId = null,   // set on connection_request_accepted | connection_request_rejected
     DateTimeOffset? At = null)
 {
@@ -295,6 +296,7 @@ public sealed record Change(
             Method: ev == "document_status_changed" ? obj.Get("method").AsString() : null,
             ContentSha256: ev == "document_status_changed" ? obj.Get("content_sha256").AsString() : null,
             SignedAt: ev == "document_status_changed" ? obj.Get("signed_at").AsString() : null,
+            CancelEffectiveDate: ev == "document_status_changed" ? obj.Get("cancel_effective_date").AsString() : null,
             RequestId: ev is "connection_request_accepted" or "connection_request_rejected"
                 ? obj.Get("request_id").AsString() : null,
             At: ModelCoerce.ParseIsoDt(obj.Get("at").AsString()))
