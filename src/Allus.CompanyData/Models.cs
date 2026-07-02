@@ -451,6 +451,9 @@ public sealed record FlowRun(
     /// <summary>The underlying hardened API object (escape hatch).</summary>
     public object? Raw { get; init; }
 
+    /// <summary>Optional YYYY-MM-DD pinned "today" for flow constants; null when absent.</summary>
+    public string? ReferenceDate { get; init; }
+
     /// <summary>The party key the company is bound to (Bindings[key] == CompanyUserId).</summary>
     public string? CompanyPartyKey
     {
@@ -511,6 +514,7 @@ public sealed record FlowRun(
             UpdatedAt: ModelCoerce.ParseIsoDt(obj.Get("updated_at").AsString()))
         {
             Raw = obj.ToObjectGraph(),
+            ReferenceDate = obj.Get("reference_date").AsString(),
         };
     }
 }

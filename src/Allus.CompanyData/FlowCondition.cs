@@ -18,6 +18,7 @@
 //   - and over [] → true; or over [] → false.
 
 using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace Allus.CompanyData;
 
@@ -166,4 +167,273 @@ public static class FlowCondition
         "le" => string.CompareOrdinal(a, b) <= 0,
         _ => string.CompareOrdinal(a, b) >= 0, // ge
     };
+
+    // ── Flow constants (computed variables) — issue #79. Pure; extends the evaluator above. ──
+    // ComputeConstants materialises each constant's value into a NEW slug→value map (answers +
+    // {key:value}) in topological (dependency) order, so the evaluator's leaf {field:<constKey>}
+    // resolves a constant with zero change. null propagates: an unresolved operand yields null; a
+    // null constant behaves like an unanswered field. Pinned by contract-flow-constants-vector.json.
+    //
+    // Constants and expression ASTs travel as the wire-agnostic Node tree (the same type conditions
+    // use), so an if-case `when` is just a Node handed to Evaluate(). Numeric results: datediff → long,
+    // math → double. Reuses this class's private ToNum / Str and public Evaluate UNCHANGED.
+
+    /// <summary>
+    /// Evaluate every constant into a NEW map = answers + {key:value}, in topological (dependency)
+    /// order. A ref to an operand not yet in the map resolves to null; null propagates. Cycles
+    /// (rejected by the author-side validator) are broken defensively via 3-colour DFS, with
+    /// dependency iteration in insertion order so every port breaks the same back-edge.
+    /// </summary>
+    public static IReadOnlyDictionary<string, object?> ComputeConstants(
+        IEnumerable<Node> constants, IReadOnlyDictionary<string, object?> answers, string? referenceDate)
+    {
+        var outMap = new Dictionary<string, object?>(answers);
+        var list = constants?.ToList() ?? new List<Node>();
+
+        var byKey = new Dictionary<string, Node>();
+        foreach (var c in list)
+        {
+            var k = c.Get("key").AsString();
+            if (k is not null) byKey[k] = c;
+        }
+        var constKeys = new HashSet<string>(byKey.Keys);
+
+        var order = new List<string>();
+        var state = new Dictionary<string, int>();          // 0 = visiting (grey), 1 = done (black)
+        void Visit(string key)
+        {
+            if (state.ContainsKey(key)) return;             // grey (cycle back-edge) or black → stop
+            state[key] = 0;
+            var deps = new OrderedKeySet();
+            CollectExprConstRefs(byKey[key].Get("expr"), constKeys, deps);
+            foreach (var dep in deps.Keys)                  // insertion order — deterministic
+                if (byKey.ContainsKey(dep)) Visit(dep);
+            state[key] = 1;
+            order.Add(key);                                  // post-order → dependencies precede dependents
+        }
+        foreach (var c in list)
+        {
+            var k = c.Get("key").AsString();
+            if (k is not null) Visit(k);
+        }
+
+        foreach (var key in order)
+            outMap[key] = EvalExpr(byKey[key].Get("expr"), outMap, referenceDate);   // read prior constants
+        return outMap;
+    }
+
+    /// <summary>
+    /// Only the constant key→value entries (the original answers excluded) — an author-preview
+    /// convenience over <see cref="ComputeConstants"/>.
+    /// </summary>
+    public static IReadOnlyDictionary<string, object?> ResolvedConstants(
+        IEnumerable<Node> constants, IReadOnlyDictionary<string, object?> answers, string? referenceDate)
+    {
+        var list = constants?.ToList() ?? new List<Node>();
+        var full = ComputeConstants(list, answers, referenceDate);
+        var result = new Dictionary<string, object?>();
+        foreach (var c in list)
+        {
+            var k = c.Get("key").AsString();
+            if (k is not null && full.TryGetValue(k, out var v)) result[k] = v;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Per-call-site wrapper: materialise constants, then evaluate the condition unchanged.
+    /// </summary>
+    public static bool EvaluateFlowCondition(
+        Node condition, IReadOnlyDictionary<string, object?> answers,
+        IEnumerable<Node> constants, string? referenceDate)
+        => Evaluate(condition, ComputeConstants(constants, answers, referenceDate));
+
+    /// <summary>Evaluate one expression AST node against the map. Any error / unknown path → null.</summary>
+    public static object? EvalExpr(Node expr, IReadOnlyDictionary<string, object?> map, string? referenceDate)
+    {
+        if (expr is null || expr.Kind != NodeKind.Object) return null;
+        switch (expr.Get("type").AsString())
+        {
+            case "lit":
+                return LitValue(expr);
+            case "ref":
+            {
+                var key = expr.Get("key").AsString();
+                if (key is not null && map.TryGetValue(key, out var v)) return v;   // stored null stays null
+                return null;                                                          // operand not in map → null
+            }
+            case "today":
+                return string.IsNullOrEmpty(referenceDate) ? null : referenceDate;    // never the device clock
+            case "if":
+            {
+                foreach (var cs in expr.Get("cases").AsList())
+                    if (Evaluate(cs.Get("when"), map))                                // a missing `when` → true
+                        return EvalExpr(cs.Get("then"), map, referenceDate);
+                return EvalExpr(expr.Get("else"), map, referenceDate);               // else required (total)
+            }
+            case "concat":
+            {
+                var sepNode = expr.Get("sep");
+                var sep = sepNode.Kind == NodeKind.Scalar && sepNode.RawScalar is string ss ? ss : "";
+                var parts = expr.Get("parts").AsList()
+                    .Select(p => EvalExpr(p, map, referenceDate))
+                    .Select(v => v is null ? "" : Str(v));                           // null part → ""
+                return string.Join(sep, parts);                                       // always text
+            }
+            case "datediff":
+            {
+                var from = ParseFlowDate(EvalExpr(expr.Get("from"), map, referenceDate));
+                var to = ParseFlowDate(EvalExpr(expr.Get("to"), map, referenceDate));
+                if (from is null || to is null) return null;                          // non-date operand → null
+                var f = from.Value; var t = to.Value;
+                return expr.Get("unit").AsString() switch
+                {
+                    "days" => DiffDays(f, t),
+                    "weeks" => DiffDays(f, t) / 7,                                    // long/int → trunc toward zero
+                    "months" => DiffMonths(f, t),
+                    "years" => DiffYears(f, t),
+                    _ => (object?)null,
+                };
+            }
+            case "math":
+            {
+                var args = expr.Get("args").AsList();
+                var nums = new List<double>(args.Count);
+                foreach (var a in args)
+                {
+                    var n = ToNum(EvalExpr(a, map, referenceDate));
+                    // any null/non-numeric (incl. bool) arg → null; a non-finite arg (e.g. the
+                    // numeric string "1e309" coercing to Infinity) → null (pinned policy).
+                    if (!n.HasValue || !double.IsFinite(n.Value)) return null;
+                    nums.Add(n.Value);
+                }
+                switch (expr.Get("op").AsString())
+                {
+                    case "add": return FinNum(nums.Aggregate(0.0, (x, y) => x + y));   // variadic, identity 0
+                    case "mul": return FinNum(nums.Aggregate(1.0, (x, y) => x * y));   // variadic, identity 1
+                    case "sub": return nums.Count >= 2 ? FinNum(nums[0] - nums[1]) : null;
+                    case "div": return nums.Count >= 2 && nums[1] != 0 ? FinNum(nums[0] / nums[1]) : null;  // /0 → null
+                    case "mod": return nums.Count >= 2 && nums[1] != 0 ? FinNum(nums[0] % nums[1]) : null;  // %0 → null (truncated remainder)
+                    case "neg": return nums.Count >= 1 ? FinNum(-nums[0]) : null;
+                    case "abs": return nums.Count >= 1 ? FinNum(Math.Abs(nums[0])) : null;
+                    case "round": return nums.Count >= 1 ? FinNum(Math.Round(nums[0], MidpointRounding.AwayFromZero)) : null;  // half away from zero
+                    case "floor": return nums.Count >= 1 ? FinNum(Math.Floor(nums[0])) : null;
+                    case "ceil": return nums.Count >= 1 ? FinNum(Math.Ceiling(nums[0])) : null;
+                    default: return null;
+                }
+            }
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>The pinned non-finite policy: an overflowed math result (Inf/NaN) → null.</summary>
+    private static object? FinNum(double r) => double.IsFinite(r) ? r : (object?)null;
+
+    /// <summary>A lit node's raw scalar value; absent/non-scalar → null (keeps native type).</summary>
+    private static object? LitValue(Node expr)
+    {
+        var v = expr.Get("value");
+        return v.Kind == NodeKind.Scalar ? v.RawScalar : null;
+    }
+
+    // Parse a value as a UTC-midnight calendar date. Non-strict-ISO-date → null (rejects 2026-02-30
+    // via the DateTime constructor). Only a real string operand can be a date; anything else → null.
+    private static (int y, int m, int d, DateTime utc)? ParseFlowDate(object? v)
+    {
+        if (v is not string s) return null;
+        var mt = Regex.Match(s.Trim(), @"^(\d{4})-(\d{2})-(\d{2})$");
+        if (!mt.Success) return null;
+        int y = int.Parse(mt.Groups[1].Value, CultureInfo.InvariantCulture);
+        int mo = int.Parse(mt.Groups[2].Value, CultureInfo.InvariantCulture);
+        int d = int.Parse(mt.Groups[3].Value, CultureInfo.InvariantCulture);
+        if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+        try
+        {
+            var utc = new DateTime(y, mo, d, 0, 0, 0, DateTimeKind.Utc);
+            if (utc.Year != y || utc.Month != mo || utc.Day != d) return null;
+            return (y, mo, d, utc);
+        }
+        catch (ArgumentOutOfRangeException) { return null; }
+    }
+
+    // Whole calendar days (both operands at UTC midnight → the difference is integral). Sign = to - from.
+    private static long DiffDays((int y, int m, int d, DateTime utc) from, (int y, int m, int d, DateTime utc) to)
+        => (long)Math.Round((to.utc - from.utc).TotalDays);
+
+    // (to.y-from.y)*12 + (to.m-from.m), minus 1 if to.day < from.day. Literal formula; works both signs.
+    private static long DiffMonths((int y, int m, int d, DateTime utc) from, (int y, int m, int d, DateTime utc) to)
+    {
+        long n = (to.y - from.y) * 12L + (to.m - from.m);
+        if (to.d < from.d) n -= 1;
+        return n;
+    }
+
+    // Standard age: to.y-from.y, minus 1 if (to.month, to.day) < (from.month, from.day) lexicographically.
+    private static long DiffYears((int y, int m, int d, DateTime utc) from, (int y, int m, int d, DateTime utc) to)
+    {
+        long n = to.y - from.y;
+        if (to.m < from.m || (to.m == from.m && to.d < from.d)) n -= 1;
+        return n;
+    }
+
+    /// <summary>
+    /// Collects keys in first-seen (insertion) order so the DFS dependency iteration is
+    /// deterministic — every port breaks the same back-edge on a (validator-rejected) cycle.
+    /// </summary>
+    private sealed class OrderedKeySet
+    {
+        private readonly HashSet<string> _seen = new();
+        public List<string> Keys { get; } = new();
+        public void Add(string k) { if (_seen.Add(k)) Keys.Add(k); }
+    }
+
+    // Collect the constant KEYS an expression directly references (topological ordering only).
+    private static void CollectExprConstRefs(Node expr, HashSet<string> constKeys, OrderedKeySet acc)
+    {
+        if (expr.Kind != NodeKind.Object) return;
+        switch (expr.Get("type").AsString())
+        {
+            case "ref":
+            {
+                var k = expr.Get("key").AsString();
+                if (k is not null && constKeys.Contains(k)) acc.Add(k);
+                return;
+            }
+            case "lit":
+            case "today":
+                return;
+            case "if":
+                foreach (var cs in expr.Get("cases").AsList())
+                {
+                    CollectCondConstRefs(cs.Get("when"), constKeys, acc);   // a when-leaf may name a constant
+                    CollectExprConstRefs(cs.Get("then"), constKeys, acc);
+                }
+                CollectExprConstRefs(expr.Get("else"), constKeys, acc);
+                return;
+            case "concat":
+                foreach (var p in expr.Get("parts").AsList()) CollectExprConstRefs(p, constKeys, acc);
+                return;
+            case "datediff":
+                CollectExprConstRefs(expr.Get("from"), constKeys, acc);
+                CollectExprConstRefs(expr.Get("to"), constKeys, acc);
+                return;
+            case "math":
+                foreach (var a in expr.Get("args").AsList()) CollectExprConstRefs(a, constKeys, acc);
+                return;
+        }
+    }
+
+    private static void CollectCondConstRefs(Node cond, HashSet<string> constKeys, OrderedKeySet acc)
+    {
+        if (cond.Kind != NodeKind.Object) return;
+        var op = cond.Get("op").AsString();
+        if (op is "and" or "or" or "not")
+        {
+            foreach (var ch in cond.Get("children").AsList()) CollectCondConstRefs(ch, constKeys, acc);
+            return;
+        }
+        var field = cond.Get("field").AsString();
+        if (field is not null && constKeys.Contains(field)) acc.Add(field);
+    }
 }
