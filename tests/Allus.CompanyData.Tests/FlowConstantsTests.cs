@@ -58,6 +58,36 @@ public sealed class FlowConstantsTests
         Assert.Equal(51, Cases().Count());
     }
 
+    // ResolvedConstants must return EXACTLY the expect map's keys — constants only, no leaked
+    // answer keys — with the same values ComputeConstants produces.
+    [Theory]
+    [MemberData(nameof(Cases))]
+    public void ResolvedConstantsVectorCase(string name, List<Node> constants,
+                           IReadOnlyDictionary<string, object?> answers, string referenceDate, string expectJson)
+    {
+        var result = FlowCondition.ResolvedConstants(constants, answers, referenceDate);
+        using var expect = JsonDocument.Parse(expectJson);
+        var expectKeys = expect.RootElement.EnumerateObject().Select(p => p.Name).ToHashSet();
+        var resultKeys = result.Keys.ToHashSet();
+        Assert.True(expectKeys.SetEquals(resultKeys),
+            $"case {name}: expected keys [{string.Join(",", expectKeys)}], got [{string.Join(",", resultKeys)}]");
+        foreach (var prop in expect.RootElement.EnumerateObject())
+        {
+            AssertValue(name, prop.Name, result[prop.Name], prop.Value);
+        }
+    }
+
+    // EvaluateFlowCondition (constants wrapper) run over the 27-case condition vector with empty
+    // constants must reproduce plain condition semantics exactly.
+    [Theory]
+    [MemberData(nameof(FlowConditionTests.Cases), MemberType = typeof(FlowConditionTests))]
+    public void EvaluateFlowConditionOverConditionVector(string name, Node condition,
+                           IReadOnlyDictionary<string, object?> answers, bool expect)
+    {
+        var got = FlowCondition.EvaluateFlowCondition(condition, answers, new List<Node>(), null);
+        Assert.True(got == expect, $"case {name}");
+    }
+
     // JSON `expect` distinguishes null from absent; numbers are compared numerically so a double
     // math result (5.0) equals a JSON integer (5) and a long datediff (9) equals JSON 9.
     private static void AssertValue(string name, string key, object? actual, JsonElement expected)
