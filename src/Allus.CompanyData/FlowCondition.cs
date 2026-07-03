@@ -59,6 +59,10 @@ public static class FlowCondition
             case "empty": return !Answered(val);
             case "in": return InList(targetNode, val);
             case "nin": return !InList(targetNode, val);
+            // #102 substring ops (text): contains needs an answer (like in); not_contains is
+            // true when unanswered (like nin). Case-sensitive; empty needle counts as contained.
+            case "contains": return Answered(val) && Str(val).Contains(Str(ScalarOf(targetNode)));
+            case "not_contains": return !(Answered(val) && Str(val).Contains(Str(ScalarOf(targetNode))));
         }
 
         if (!Answered(val)) return false;

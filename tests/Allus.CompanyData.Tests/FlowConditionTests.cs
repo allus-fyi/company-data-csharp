@@ -46,6 +46,6 @@ public sealed class FlowConditionTests
     [Fact]
     public void VectorHasAllCases()
     {
-        Assert.Equal(27, Cases().Count());
+        Assert.Equal(35, Cases().Count());
     }
 }

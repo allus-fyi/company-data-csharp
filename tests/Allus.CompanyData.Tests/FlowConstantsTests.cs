@@ -77,7 +77,7 @@ public sealed class FlowConstantsTests
         }
     }
 
-    // EvaluateFlowCondition (constants wrapper) run over the 27-case condition vector with empty
+    // EvaluateFlowCondition (constants wrapper) run over the 35-case condition vector with empty
     // constants must reproduce plain condition semantics exactly.
     [Theory]
     [MemberData(nameof(FlowConditionTests.Cases), MemberType = typeof(FlowConditionTests))]
