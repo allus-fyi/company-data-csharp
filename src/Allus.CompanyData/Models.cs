@@ -90,6 +90,9 @@ public sealed record RequestField(
     /// <summary>The underlying hardened API object (escape hatch).</summary>
     public object? Raw { get; init; }
 
+    /// <summary>Which customer TYPE this row applies to: "person"|"company"|"both" (B2B, #163); null on older API.</summary>
+    public string? Audience { get; init; }
+
     public static RequestField FromApi(Node obj) => new(
         Slug: obj.Get("slug").AsString(),
         Label: obj.Get("label").AsString(),
@@ -99,6 +102,7 @@ public sealed record RequestField(
                    || (ModelCoerce.CoerceBool(obj.Get("mandatory_connected")) ?? false))
     {
         Raw = obj.ToObjectGraph(),
+        Audience = obj.Get("audience").AsString(),
     };
 
     public static List<RequestField> ListFromApi(Node body)
@@ -198,6 +202,12 @@ public sealed record Connection(
     /// <summary>The underlying hardened API object (escape hatch).</summary>
     public object? Raw { get; init; }
 
+    /// <summary>The connected customer's TYPE: "person"|"company" (B2B, #163); null on older API.</summary>
+    public string? CustomerType { get; init; }
+
+    /// <summary>The customer's profile share code (previously only via <see cref="Raw"/>); null when absent.</summary>
+    public string? ShareCode { get; init; }
+
     public static Connection FromApi(
         Node obj,
         TypeForSlug typeForSlug,
@@ -231,6 +241,8 @@ public sealed record Connection(
         return new Connection(connId, personId, displayName, connectedAt, values)
         {
             Raw = obj.ToObjectGraph(),
+            CustomerType = obj.Get("customer_type").AsString() ?? id.Get("customer_type").AsString(),
+            ShareCode = obj.Get("share_code").AsString() ?? id.Get("share_code").AsString(),
         };
     }
 }
@@ -262,6 +274,9 @@ public sealed record Change(
 {
     /// <summary>The underlying hardened API object (escape hatch).</summary>
     public object? Raw { get; init; }
+
+    /// <summary>The customer's TYPE: "person"|"company" (B2B, #163); null on older API.</summary>
+    public string? CustomerType { get; init; }
 
     public static Change FromApi(
         Node obj,
@@ -302,6 +317,7 @@ public sealed record Change(
             At: ModelCoerce.ParseIsoDt(obj.Get("at").AsString()))
         {
             Raw = obj.ToObjectGraph(),
+            CustomerType = obj.Get("customer_type").AsString(),
         };
     }
 

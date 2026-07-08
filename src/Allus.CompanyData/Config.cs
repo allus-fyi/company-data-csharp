@@ -29,6 +29,8 @@ public sealed class Config
         (nameof(ClientSecret), "ALLUS_CLIENT_SECRET"),
         (nameof(ServicePrivateKey), "ALLUS_SERVICE_PRIVATE_KEY"),
         (nameof(KeyPassphrase), "ALLUS_KEY_PASSPHRASE"),
+        (nameof(CustomerClientId), "ALLUS_CUSTOMER_CLIENT_ID"),
+        (nameof(CustomerClientSecret), "ALLUS_CUSTOMER_CLIENT_SECRET"),
         (nameof(AccountPrivateKey), "ALLUS_ACCOUNT_PRIVATE_KEY"),
         (nameof(AccountPassphrase), "ALLUS_ACCOUNT_PASSPHRASE"),
         (nameof(CacheDir), "ALLUS_CACHE_DIR"),
@@ -47,17 +49,23 @@ public sealed class Config
     /// <summary>API base URL, e.g. <c>https://api.allme.fyi</c>.</summary>
     public required string ApiUrl { get; init; }
 
-    /// <summary>The registered service client id.</summary>
-    public required string ClientId { get; init; }
+    /// <summary>The registered service client id (service role).</summary>
+    public string? ClientId { get; init; }
 
-    /// <summary>The registered service client secret.</summary>
-    public required string ClientSecret { get; init; }
+    /// <summary>The registered service client secret (service role).</summary>
+    public string? ClientSecret { get; init; }
 
-    /// <summary>Path to the OpenSSL-encrypted PKCS#8 service private-key PEM.</summary>
-    public required string ServicePrivateKey { get; init; }
+    /// <summary>Path to the OpenSSL-encrypted PKCS#8 service private-key PEM (service role).</summary>
+    public string? ServicePrivateKey { get; init; }
 
-    /// <summary>Passphrase that decrypts the service PEM in memory.</summary>
-    public required string KeyPassphrase { get; init; }
+    /// <summary>Passphrase that decrypts the service PEM in memory (service role).</summary>
+    public string? KeyPassphrase { get; init; }
+
+    /// <summary>Customer role (#168): the acct_* client id.</summary>
+    public string? CustomerClientId { get; init; }
+
+    /// <summary>Customer role (#168): the acct_* client secret.</summary>
+    public string? CustomerClientSecret { get; init; }
 
     /// <summary>OPTIONAL — only needed for <c>encrypt_payload</c> webhooks.</summary>
     public string? AccountPrivateKey { get; init; }
@@ -140,7 +148,27 @@ public sealed class Config
     /// <summary>Build entirely from <c>ALLUS_*</c> env vars.</summary>
     public static Config FromEnv() => Build(null);
 
-    private static Config Build(JsonElement? data)
+    /// <summary>Load a CUSTOMER-role config (#168) from a JSON file — requires the acct_* pair
+    /// + account key, not the service PEM. Env vars override file values.</summary>
+    public static Config FromCustomerFile(string path)
+    {
+        string raw;
+        try { raw = File.ReadAllText(path); }
+        catch (FileNotFoundException) { throw new ConfigException($"config file not found: {path}"); }
+        catch (DirectoryNotFoundException) { throw new ConfigException($"config file not found: {path}"); }
+        catch (IOException e) { throw new ConfigException($"could not read config file: {path}: {e.Message}"); }
+        JsonElement data;
+        try { data = JsonDocument.Parse(raw).RootElement; }
+        catch (JsonException e) { throw new ConfigException($"config file is not valid JSON: {path}: {e.Message}"); }
+        if (data.ValueKind != JsonValueKind.Object)
+            throw new ConfigException($"config file must be a JSON object: {path}");
+        return Build(data, "customer");
+    }
+
+    /// <summary>Build a CUSTOMER-role config entirely from ALLUS_* env vars.</summary>
+    public static Config FromCustomerEnv() => Build(null, "customer");
+
+    private static Config Build(JsonElement? data, string role = "service")
     {
         // Scalar fields: env var (if set) overrides the file value.
         var values = new Dictionary<string, string>();
@@ -232,11 +260,9 @@ public sealed class Config
                 "configure at most one webhook auth method (found: " + string.Join(", ", present) + ")");
 
         // Required fields (fail fast).
-        var required = new[]
-        {
-            nameof(ApiUrl), nameof(ClientId), nameof(ClientSecret),
-            nameof(ServicePrivateKey), nameof(KeyPassphrase),
-        };
+        var required = role == "customer"
+            ? new[] { nameof(ApiUrl), nameof(CustomerClientId), nameof(CustomerClientSecret), nameof(AccountPrivateKey) }
+            : new[] { nameof(ApiUrl), nameof(ClientId), nameof(ClientSecret), nameof(ServicePrivateKey), nameof(KeyPassphrase) };
         var missing = required
             .Where(r => !values.TryGetValue(r, out var v) || string.IsNullOrEmpty(v))
             .Select(JsonKey)
@@ -252,10 +278,12 @@ public sealed class Config
         return new Config
         {
             ApiUrl = values[nameof(ApiUrl)],
-            ClientId = values[nameof(ClientId)],
-            ClientSecret = values[nameof(ClientSecret)],
-            ServicePrivateKey = values[nameof(ServicePrivateKey)],
-            KeyPassphrase = values[nameof(KeyPassphrase)],
+            ClientId = values.GetValueOrDefault(nameof(ClientId)),
+            ClientSecret = values.GetValueOrDefault(nameof(ClientSecret)),
+            ServicePrivateKey = values.GetValueOrDefault(nameof(ServicePrivateKey)),
+            KeyPassphrase = values.GetValueOrDefault(nameof(KeyPassphrase)),
+            CustomerClientId = values.GetValueOrDefault(nameof(CustomerClientId)),
+            CustomerClientSecret = values.GetValueOrDefault(nameof(CustomerClientSecret)),
             AccountPrivateKey = values.GetValueOrDefault(nameof(AccountPrivateKey)),
             AccountPassphrase = values.GetValueOrDefault(nameof(AccountPassphrase)),
             Webhooks = webhooks,
@@ -312,6 +340,8 @@ public sealed class Config
         nameof(ApiUrl) => "api_url",
         nameof(ClientId) => "client_id",
         nameof(ClientSecret) => "client_secret",
+        nameof(CustomerClientId) => "customer_client_id",
+        nameof(CustomerClientSecret) => "customer_client_secret",
         nameof(ServicePrivateKey) => "service_private_key",
         nameof(KeyPassphrase) => "key_passphrase",
         nameof(AccountPrivateKey) => "account_private_key",

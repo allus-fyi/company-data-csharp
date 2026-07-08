@@ -472,4 +472,53 @@ public class ModelTests
         var json = Assert.IsAssignableFrom<IDictionary<string, object?>>(doc.Json());
         Assert.Equal("pro", json["plan"]); // decrypted via injected decrypt
     }
+
+    // ── B2B additive fields (#163) ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void RequestFieldIncludesAudience()
+    {
+        var body = Node.FromJsonString(JsonSerializer.Serialize(new
+        {
+            request_fields = new object[]
+            {
+                new { slug = "billing", label = "Billing", type = "email", audience = "company" },
+                new { slug = "ref", label = "Ref", type = "text" },
+            },
+        }));
+        var fields = RequestField.ListFromApi(body);
+        Assert.Equal("company", fields[0].Audience);
+        Assert.Null(fields[1].Audience);
+    }
+
+    [Fact]
+    public void ChangeIncludesCustomerType()
+    {
+        var body = Obj(new()
+        {
+            ["changes"] = Node.List(new List<Node>
+            {
+                Obj(new() { ["id"] = S("chg-1"), ["event"] = S("connection_created"), ["person_user_id"] = S("co-1"), ["customer_type"] = S("company"), ["at"] = S("2026-07-07T12:00:00Z") }),
+                Obj(new() { ["id"] = S("chg-2"), ["event"] = S("connection_created"), ["person_user_id"] = S("p-2"), ["at"] = S("2026-07-07T12:00:00Z") }),
+            }),
+        });
+        var changes = Change.ListFromApi(body, _ => null, _ => "");
+        Assert.Equal("company", changes[0].CustomerType);
+        Assert.Null(changes[1].CustomerType);
+    }
+
+    [Fact]
+    public void ConnectionIncludesCustomerTypeAndShareCode()
+    {
+        var conn = Connection.FromApi(
+            Obj(new() { ["connection_id"] = S("c-1"), ["user_id"] = S("co-9"), ["customer_type"] = S("company"), ["share_code"] = S("PARTNER"), ["values"] = Obj(new()) }),
+            _ => null, _ => "");
+        Assert.Equal("company", conn.CustomerType);
+        Assert.Equal("PARTNER", conn.ShareCode);
+        var bare = Connection.FromApi(
+            Obj(new() { ["connection_id"] = S("c-2"), ["user_id"] = S("p-1"), ["values"] = Obj(new()) }),
+            _ => null, _ => "");
+        Assert.Null(bare.CustomerType);
+        Assert.Null(bare.ShareCode);
+    }
 }
