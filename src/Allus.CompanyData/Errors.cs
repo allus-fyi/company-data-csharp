@@ -95,3 +95,24 @@ public class WebhookException : Exception
     public WebhookException(string message) : base(message) { }
     public WebhookException(string message, Exception inner) : base(message, inner) { }
 }
+
+/// <summary>
+/// A freshly-typed value failed its field type's shape/format check (#302) before encryption.
+/// Names the offending <see cref="Slug"/> and the resolved <see cref="FieldType"/>. Client
+/// validation is UX, never a security boundary.
+/// </summary>
+public class ValidationException : Exception
+{
+    /// <summary>The slug (flow) or request_field_id (typed answer) of the offending value.</summary>
+    public string Slug { get; }
+
+    /// <summary>The resolved field type that the value failed.</summary>
+    public string FieldType { get; }
+
+    public ValidationException(string slug, string fieldType)
+        : base($"validation error: value for \"{slug}\" is not a valid {fieldType}")
+    {
+        Slug = slug;
+        FieldType = fieldType;
+    }
+}

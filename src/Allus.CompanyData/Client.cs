@@ -729,6 +729,18 @@ public sealed class Client : IDisposable
         foreach (var (k, v) in fill) full[k] = v;
         var svcPub = ServicePublicKey();
 
+        // #302: validate each freshly-typed answer against its field type from the pinned
+        // definition, BEFORE encryption. Skip when the type can't be resolved.
+        foreach (var (slug, val) in fill)
+        {
+            var ft = FieldTypeForSlug(run.Definition, slug);
+            if (!string.IsNullOrEmpty(ft))
+            {
+                var plainForCheck = val is string vs ? vs : JsonSerializer.Serialize(val);
+                if (!FieldValidation.IsValid(ft!, plainForCheck)) throw new ValidationException(slug, ft!);
+            }
+        }
+
         var answersOut = new List<object?>();
         foreach (var (slug, val) in fill)
         {
@@ -915,6 +927,31 @@ public sealed class Client : IDisposable
     {
         var node = NodeByKey(definition, nodeKey);
         return node?.Get("party").AsString();
+    }
+
+    /// <summary>
+    /// Resolve a field element's <c>field_type</c> from the pinned flow definition by scanning
+    /// every node's elements for a <c>kind:"field"</c> element with the given slug. Returns null
+    /// when the slug is not a field element (or elements are absent) — callers then SKIP
+    /// validation rather than invent a type (#302).
+    /// </summary>
+    private static string? FieldTypeForSlug(Node definition, string slug)
+    {
+        if (definition.Get("nodes").Kind != NodeKind.List) return null;
+        foreach (var n in definition.Get("nodes").AsList())
+        {
+            if (n.Kind != NodeKind.Object || n.Get("elements").Kind != NodeKind.List) continue;
+            foreach (var el in n.Get("elements").AsList())
+            {
+                if (el.Kind != NodeKind.Object) continue;
+                if (el.Get("kind").AsString() == "field" && el.Get("slug").AsString() == slug)
+                {
+                    var ft = el.Get("field_type").AsString();
+                    return string.IsNullOrEmpty(ft) ? el.Get("type").AsString() : ft;
+                }
+            }
+        }
+        return null;
     }
 
     /// <summary>Build a <c>data:&lt;mime&gt;;base64,&lt;…&gt;</c> URI for the per-person file envelope.</summary>

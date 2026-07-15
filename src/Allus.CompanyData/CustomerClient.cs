@@ -104,6 +104,8 @@ public sealed class CustomerClient
     private readonly Func<double, System.Threading.CancellationToken, Task> _sleep;
     private readonly System.Collections.Generic.Dictionary<string, RSA?> _pubKeyCache = new();
     private readonly System.Collections.Generic.Dictionary<string, RSA?> _serviceKeyCache = new();
+    // "companyCode/serviceCode" → {request_field_id: field_type}, for typed-answer validation (#302).
+    private readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.Dictionary<string, string>> _requestTypeCache = new();
     private Pump? _pump;
 
     public CustomerClient(
@@ -290,10 +292,48 @@ public sealed class CustomerClient
         return Crypto.Decrypt(wrapper, _accountKey);
     }
 
+    /// <summary>
+    /// Resolve {request_field_id: field_type} for a service from the connect-screen lookup, cached
+    /// per company/service. Best-effort — a lookup failure yields an empty map so typed-answer
+    /// validation is simply skipped (#302).
+    /// </summary>
+    private async Task<Dictionary<string, string>> RequestFieldTypesAsync(string companyCode, string serviceCode, System.Threading.CancellationToken ct)
+    {
+        var key = $"{companyCode}/{serviceCode}";
+        if (_requestTypeCache.TryGetValue(key, out var cached)) return cached;
+        var map = new Dictionary<string, string>();
+        try
+        {
+            var body = await _http.GetAsync($"{Conn}/lookup/{companyCode}/{serviceCode}", null, ct).ConfigureAwait(false);
+            if (body.Kind == NodeKind.Object && body.Get("request_fields").Kind == NodeKind.List)
+            {
+                foreach (var r in body.Get("request_fields").AsList())
+                {
+                    if (r.Kind != NodeKind.Object) continue;
+                    var id = r.Get("id").AsString();
+                    var ft = r.Get("field_type").AsString();
+                    if (string.IsNullOrEmpty(ft)) ft = r.Get("type").AsString();
+                    if (!string.IsNullOrEmpty(id) && !string.IsNullOrEmpty(ft)) map[id!] = ft!;
+                }
+            }
+        }
+        catch (ApiException) { /* best-effort — skip validation when unavailable */ }
+        _requestTypeCache[key] = map;
+        return map;
+    }
+
     private async Task<List<object>> EncryptTypedAsync(IReadOnlyList<TypedAnswer> answers, string companyCode, string serviceCode, System.Threading.CancellationToken ct)
     {
         var pub = await ServiceKeyAsync(companyCode, serviceCode, ct).ConfigureAwait(false)
             ?? throw new ConfigException($"no service key for {companyCode}/{serviceCode}");
+        // #302: validate each typed answer against its request row's field type, BEFORE encryption.
+        // Skip an answer whose type can't be resolved (do not invent one).
+        var types = await RequestFieldTypesAsync(companyCode, serviceCode, ct).ConfigureAwait(false);
+        foreach (var a in answers)
+        {
+            if (types.TryGetValue(a.RequestFieldId, out var ft) && !FieldValidation.IsValid(ft, a.Value))
+                throw new ValidationException(a.RequestFieldId, ft);
+        }
         return answers.Select(a => (object)new Dictionary<string, object?>
         {
             ["request_field_id"] = a.RequestFieldId,
