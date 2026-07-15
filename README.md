@@ -838,3 +838,14 @@ passphrase, decrypts the text wrapper to the exact expected plaintext, and
 decrypts the binary wrapper to its envelope and then the inner file bytes (both
 SHA-256-matched) — proving the wire format is decoded identically to the other
 ports, not merely self-consistently.
+
+## Sign in with allme (OAuth, #195)
+
+```csharp
+var oauth = OAuthClient.FromConfig("idw-config.json");
+var url = oauth.AuthorizeUrl("signin", state: state, codeChallenge: ch);
+// ...user approves; your redirect receives ?code=...
+var res = await oauth.CompleteSignInAsync(code, verifier); // res.DisplayName, res.Mode, res.Values
+```
+
+Modes: `signin` | `one_time` (claim values decrypted for you) | `connect`. `PollResultAsync(state)` drives the detached mode.

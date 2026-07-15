@@ -33,6 +33,11 @@ public sealed class Config
         (nameof(CustomerClientSecret), "ALLUS_CUSTOMER_CLIENT_SECRET"),
         (nameof(AccountPrivateKey), "ALLUS_ACCOUNT_PRIVATE_KEY"),
         (nameof(AccountPassphrase), "ALLUS_ACCOUNT_PASSPHRASE"),
+        (nameof(OAuthClientId), "ALLUS_OAUTH_CLIENT_ID"),
+        (nameof(OAuthRedirectUri), "ALLUS_OAUTH_REDIRECT_URI"),
+        (nameof(OAuthClientSecret), "ALLUS_OAUTH_CLIENT_SECRET"),
+        (nameof(OAuthPrivateKey), "ALLUS_OAUTH_PRIVATE_KEY"),
+        (nameof(OAuthKeyPassphrase), "ALLUS_OAUTH_KEY_PASSPHRASE"),
         (nameof(CacheDir), "ALLUS_CACHE_DIR"),
         (nameof(Format), "ALLUS_FORMAT"),
     };
@@ -72,6 +77,21 @@ public sealed class Config
 
     /// <summary>OPTIONAL — passphrase for the account PEM.</summary>
     public string? AccountPassphrase { get; init; }
+
+    /// <summary>"Sign in with allme" idw role (#195): the idw_* app client id.</summary>
+    public string? OAuthClientId { get; init; }
+
+    /// <summary>Idw role: the registered redirect URI.</summary>
+    public string? OAuthRedirectUri { get; init; }
+
+    /// <summary>Idw role: the client secret (confidential apps only).</summary>
+    public string? OAuthClientSecret { get; init; }
+
+    /// <summary>Idw role: path to the app's encrypted PKCS#8 PEM (needed only to decrypt one_time values).</summary>
+    public string? OAuthPrivateKey { get; init; }
+
+    /// <summary>Idw role: passphrase that decrypts the app PEM in memory.</summary>
+    public string? OAuthKeyPassphrase { get; init; }
 
     /// <summary>
     /// Per-webhook HMAC secrets keyed by webhook id (matched via <c>X-Allus-Webhook-Id</c>). A
@@ -168,6 +188,26 @@ public sealed class Config
     /// <summary>Build a CUSTOMER-role config entirely from ALLUS_* env vars.</summary>
     public static Config FromCustomerEnv() => Build(null, "customer");
 
+    /// <summary>Load an IDW-role config (#195, "Sign in with allme") from a JSON file — requires the
+    /// oauth_client_id + oauth_redirect_uri. Env vars override file values.</summary>
+    public static Config FromIdwFile(string path)
+    {
+        string raw;
+        try { raw = File.ReadAllText(path); }
+        catch (FileNotFoundException) { throw new ConfigException($"config file not found: {path}"); }
+        catch (DirectoryNotFoundException) { throw new ConfigException($"config file not found: {path}"); }
+        catch (IOException e) { throw new ConfigException($"could not read config file: {path}: {e.Message}"); }
+        JsonElement data;
+        try { data = JsonDocument.Parse(raw).RootElement; }
+        catch (JsonException e) { throw new ConfigException($"config file is not valid JSON: {path}: {e.Message}"); }
+        if (data.ValueKind != JsonValueKind.Object)
+            throw new ConfigException($"config file must be a JSON object: {path}");
+        return Build(data, "idw");
+    }
+
+    /// <summary>Build an IDW-role config entirely from ALLUS_* env vars.</summary>
+    public static Config FromIdwEnv() => Build(null, "idw");
+
     private static Config Build(JsonElement? data, string role = "service")
     {
         // Scalar fields: env var (if set) overrides the file value.
@@ -260,9 +300,12 @@ public sealed class Config
                 "configure at most one webhook auth method (found: " + string.Join(", ", present) + ")");
 
         // Required fields (fail fast).
-        var required = role == "customer"
-            ? new[] { nameof(ApiUrl), nameof(CustomerClientId), nameof(CustomerClientSecret), nameof(AccountPrivateKey) }
-            : new[] { nameof(ApiUrl), nameof(ClientId), nameof(ClientSecret), nameof(ServicePrivateKey), nameof(KeyPassphrase) };
+        var required = role switch
+        {
+            "customer" => new[] { nameof(ApiUrl), nameof(CustomerClientId), nameof(CustomerClientSecret), nameof(AccountPrivateKey) },
+            "idw" => new[] { nameof(ApiUrl), nameof(OAuthClientId), nameof(OAuthRedirectUri) },
+            _ => new[] { nameof(ApiUrl), nameof(ClientId), nameof(ClientSecret), nameof(ServicePrivateKey), nameof(KeyPassphrase) },
+        };
         var missing = required
             .Where(r => !values.TryGetValue(r, out var v) || string.IsNullOrEmpty(v))
             .Select(JsonKey)
@@ -286,6 +329,11 @@ public sealed class Config
             CustomerClientSecret = values.GetValueOrDefault(nameof(CustomerClientSecret)),
             AccountPrivateKey = values.GetValueOrDefault(nameof(AccountPrivateKey)),
             AccountPassphrase = values.GetValueOrDefault(nameof(AccountPassphrase)),
+            OAuthClientId = values.GetValueOrDefault(nameof(OAuthClientId)),
+            OAuthRedirectUri = values.GetValueOrDefault(nameof(OAuthRedirectUri)),
+            OAuthClientSecret = values.GetValueOrDefault(nameof(OAuthClientSecret)),
+            OAuthPrivateKey = values.GetValueOrDefault(nameof(OAuthPrivateKey)),
+            OAuthKeyPassphrase = values.GetValueOrDefault(nameof(OAuthKeyPassphrase)),
             Webhooks = webhooks,
             WebhookBearerToken = bearer,
             WebhookBasic = basicAuth,
@@ -346,6 +394,11 @@ public sealed class Config
         nameof(KeyPassphrase) => "key_passphrase",
         nameof(AccountPrivateKey) => "account_private_key",
         nameof(AccountPassphrase) => "account_passphrase",
+        nameof(OAuthClientId) => "oauth_client_id",
+        nameof(OAuthRedirectUri) => "oauth_redirect_uri",
+        nameof(OAuthClientSecret) => "oauth_client_secret",
+        nameof(OAuthPrivateKey) => "oauth_private_key",
+        nameof(OAuthKeyPassphrase) => "oauth_key_passphrase",
         nameof(CacheDir) => "cache_dir",
         nameof(Format) => "format",
         _ => field,
