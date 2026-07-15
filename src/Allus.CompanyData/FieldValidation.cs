@@ -37,6 +37,11 @@ public static class FieldValidation
 
     private static readonly string[] Gender = { "Male", "Female", "Non-binary", "Prefer not to say" };
 
+    // #303: country/nationality store an ISO 3166-1 alpha-2 code; address state = USPS 2-letter code.
+    // The lists come from the generated country data (do NOT inline them — they would rot).
+    private static readonly HashSet<string> CountrySet = new(CountryData.CountryCodes);
+    private static readonly HashSet<string> UsStateSet = new(CountryData.UsStateCodes);
+
     // A structured sub-field rule. Default ({}) = any non-empty string.
     private readonly record struct Sub(bool IsInt = false, Regex? Re = null, string? Kind = null);
 
@@ -45,8 +50,8 @@ public static class FieldValidation
         ["address"] = new()
         {
             ["postal_code"] = new(Re: PostalRe),
-            ["street"] = new(), ["building_number"] = new(), ["affix"] = new(),
-            ["city"] = new(), ["state"] = new(), ["country"] = new(),
+            ["country"] = new(Kind: "countryCode"), ["state"] = new(Kind: "usState"),
+            ["street"] = new(), ["building_number"] = new(), ["affix"] = new(), ["city"] = new(),
         },
         ["creditcard"] = new()
         {
@@ -91,6 +96,8 @@ public static class FieldValidation
         ["legal_document"] = new("object"),
         ["number"] = new("number"),
         ["boolean"] = new("boolean"),
+        ["country"] = new("countryCode"),
+        ["nationality"] = new("countryCode"),
         // text + unknown => no rule => accept anything
     };
 
@@ -149,6 +156,10 @@ public static class FieldValidation
                     && !double.IsInfinity(f) && !double.IsNaN(f);
             case "boolean":
                 return value == "true" || value == "false";
+            case "countryCode":
+                return CountrySet.Contains(value);
+            case "usState":
+                return UsStateSet.Contains(value);
             default:
                 return true;
         }
@@ -209,4 +220,11 @@ public static class FieldValidation
     /// <summary>Returns null when valid, else the <paramref name="fieldType"/> tag (for i18n mapping).</summary>
     public static string? Error(string fieldType, string? value) =>
         IsValid(fieldType, value) ? null : fieldType;
+
+    /// <summary>True if <paramref name="code"/> is an assigned ISO 3166-1 alpha-2 country code (#303).</summary>
+    public static bool IsValidCountryCode(string? code) => code is not null && CountrySet.Contains(code);
+
+    /// <summary>The ITU E.164 dial code (digits only, no <c>+</c>) for a country code, or null (#303).</summary>
+    public static string? DialCodeFor(string? code) =>
+        code is not null && CountryData.DialCodes.TryGetValue(code, out var dial) ? dial : null;
 }
