@@ -125,6 +125,9 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
     /// <summary>The underlying hardened API value object (escape hatch).</summary>
     public object? Raw { get; init; }
 
+    /// <summary>#311: true iff the value carries verified metadata AND the hash matches.</summary>
+    public bool Verified { get; init; }
+
     public static Value FromApi(
         Node obj,
         string? fieldType,
@@ -135,7 +138,17 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
         var updatedAt = ModelCoerce.ParseIsoDt(
             obj.Has("updatedAt") ? obj.Get("updatedAt").AsString() : obj.Get("updated_at").AsString());
         var typed = TypedValue(obj, fieldType, decryptValue, binaryFetch);
-        return new Value(typed, live, updatedAt) { Raw = obj.ToObjectGraph() };
+        return new Value(typed, live, updatedAt) { Raw = obj.ToObjectGraph(), Verified = VerifiedFrom(obj, typed) };
+    }
+
+    /// <summary>#311: recompute the verified flag from the just-decrypted plaintext (email string only).</summary>
+    internal static bool VerifiedFrom(Node obj, object? plaintext)
+    {
+        if (plaintext is not string pt) return false;
+        var vhash = obj.Get("verified_hash").AsString();
+        var vsalt = obj.Get("verified_salt").AsString();
+        if (string.IsNullOrEmpty(vhash) || string.IsNullOrEmpty(vsalt)) return false;
+        return Crypto.HashMatches(vsalt, vhash, pt);
     }
 
     internal static object? TypedValue(
@@ -278,6 +291,9 @@ public sealed record Change(
     /// <summary>The customer's TYPE: "person"|"company" (B2B, #163); null on older API.</summary>
     public string? CustomerType { get; init; }
 
+    /// <summary>#311: true iff a field_updated value is verified (hash matches the decrypted plaintext).</summary>
+    public bool Verified { get; init; }
+
     public static Change FromApi(
         Node obj,
         TypeForSlug typeForSlug,
@@ -318,6 +334,7 @@ public sealed record Change(
         {
             Raw = obj.ToObjectGraph(),
             CustomerType = obj.Get("customer_type").AsString(),
+            Verified = Value.VerifiedFrom(obj, value),
         };
     }
 

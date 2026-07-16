@@ -293,4 +293,17 @@ public static class Crypto
                 throw new DecryptException("wrapper must be a JSON object, dictionary, or JSON string");
         }
     }
+
+    /// <summary>#311: true iff sha256(salt ‖ plaintext) == expectedHash (hex). Consumers recompute
+    /// this from the plaintext they just decrypted and trust the verified flag ONLY on a match.</summary>
+    public static bool HashMatches(string salt, string expectedHash, string plaintext)
+    {
+        if (string.IsNullOrEmpty(salt) || string.IsNullOrEmpty(expectedHash)) return false;
+        var computed = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(salt + plaintext)))
+            .ToLowerInvariant();
+        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            System.Text.Encoding.UTF8.GetBytes(computed), System.Text.Encoding.UTF8.GetBytes(expectedHash));
+    }
+
 }
