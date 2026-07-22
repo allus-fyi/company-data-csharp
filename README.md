@@ -658,7 +658,7 @@ await client.UpdateDocumentMetadataAsync(contract.Id!,
 await client.DeleteDocumentAsync(contract.Id!);
 ```
 
-### Reacting to status changes in the pump / webhook
+### Reacting to status changes in the pump
 
 When a recipient acts on a document (e.g. signs it), the platform emits a
 **`document_status_changed`** change event. It carries `Change.DocumentId` and
@@ -667,7 +667,7 @@ When a recipient acts on a document (e.g. signs it), the platform emits a
 ```csharp
 async Task Handle(Change change)
 {
-    if (Seen(change.Id)) return;                 // idempotent — dedup on the stable id
+    if (Seen(change.Id)) return;                 // idempotent — dedup on the id is valid on the PUMP only (see Webhooks)
     switch (change.Event)
     {
         case "document_status_changed":
@@ -685,7 +685,10 @@ await client.ProcessChangesAsync(Handle);
 ```
 
 The same event arrives over [webhooks](#webhooks) with the identical shape — read
-`change.DocumentId` / `change.Status` either way.
+`change.DocumentId` / `change.Status` either way. **The `Seen`/`RecordSeen` dedup above is
+pump-only**, though: a webhook body's id is not an idempotency key — a live delivery mints it,
+a backlog replay carries the durable row's id — see
+the webhook [delivery contract](#delivery-contract--effectively-unique-rarely-replayed).
 
 ---
 
@@ -701,6 +704,41 @@ platform POSTs each change event to your configured webhook URL with:
 All secrets/keys come from config; the helpers take **no key or secret
 arguments**. Use the **raw request body bytes** (do not re-serialize a parsed
 body — the HMAC is over the exact bytes the platform sent).
+
+### Delivery contract — effectively unique, rarely replayed
+
+Each queued event is POSTed **once**, and **only HTTP `200` counts as delivered** — a
+`202`, a `204`, a 3xx redirect and every 4xx/5xx are all treated as a failure. On anything
+other than `200` (or a timeout or connection error) the event is **not retried in place**:
+it and the rest of the webhook's queue move to a durable server-side backlog and the
+webhook is marked bad. The backlog is delivered later, either automatically when
+the webhook next probes healthy, or when you drain it yourself with
+`GET /api/company-data/changes?webhook_id=…` (delete-on-read).
+
+So deliveries are **effectively unique** — with one rare exception. If your endpoint
+processed an event but the platform never saw your `200` (your response timed out, or
+you crashed after committing but before responding), the event is treated as failed
+and replayed on recovery, so you receive it **again**. Nothing caps that at two: a
+failed probe leaves its backlog row in place, so every later recovery attempt whose
+`200` is likewise lost replays the same event once more. Inside that window the
+contract is **at-least-once** — plan for one or more repeats, not for exactly one.
+
+> **Do not use `change.Id` as an idempotency key here.** On the webhook path the id is
+> neither reliably stable nor reliably fresh, and a receiver cannot tell which one it is
+> holding. A **live** delivery is built with no change row behind it, so its id is minted
+> for that single POST — the later replay of the same event is rebuilt from a durable
+> backlog row and therefore carries a **different** id. But a replayed delivery carries
+> **that row's** id, and the row stays in place until it is delivered successfully, so a
+> re-attempted replay arrives with the **same** id — which changes again if the event is
+> re-backlogged after a further failure. An id check therefore misses the duplicate you
+> are most likely to see and matches only a rarer one; it is not a contract. If you need
+> strict idempotency, key on the **content** — event + person + slug/document + payload —
+> never on the id.
+
+**Webhooks and the pull feed are alternative integrations — consume one, never both.**
+The id-dedup guidance in the changes-pump section above applies to the pump only, where
+`change.Id` is the real server change-row id.
+
 
 ### In an ASP.NET Core minimal API
 
@@ -730,13 +768,10 @@ app.MapPost("/allus/webhook", async (HttpRequest req, Client client) =>
         return Results.Unauthorized();                   // bad / unknown signature, or unparseable envelope
     }
 
-    // Same idempotency rule as the pump: dedup on change.Id.
-    if (!Seen(change.Id))
-    {
-        await ApplyChange(change);
-        RecordSeen(change.Id);
-    }
-    return Results.NoContent();
+    // Do NOT carry the pump's id-dedup over here: the webhook id is not an idempotency
+    // key (see "Delivery contract" above). Key on content if you need one.
+    await ApplyChange(change);
+    return Results.Ok();   // 200 — the ONLY status allus counts as delivered
 });
 
 app.Run();
