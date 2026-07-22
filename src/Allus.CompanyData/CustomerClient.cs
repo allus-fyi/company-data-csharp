@@ -120,11 +120,15 @@ public sealed class CustomerClient
     /// <summary>
     /// #344 review pass 3: _serviceKeyCache and _requestTypeCache sit on the same concurrent
     /// encryption paths as _pubKeyCache, so an unsynchronised Dictionary corrupts under concurrent
-    /// read+write. Neither has an invalidator, so neither needs a generation counter — but adding
-    /// one later MUST bring a generation with it.
+    /// read+write. _requestTypeCache has no invalidator, so it needs no generation counter — but
+    /// adding one later MUST bring a generation with it.
+    /// <para>#411 is that "later" for _serviceKeyCache: it now HAS an invalidator
+    /// (<see cref="InvalidateServiceKey"/>, driven by the <c>service_key_rotated</c> change), so it
+    /// carries _serviceKeyGen under _otherLock, on exactly the same reasoning as _pubKeyGen.</para>
     /// </summary>
     private readonly object _otherLock = new();
     private readonly System.Collections.Generic.Dictionary<string, RSA?> _serviceKeyCache = new();
+    private readonly System.Collections.Generic.Dictionary<string, ulong> _serviceKeyGen = new();
     // "companyCode/serviceCode" → {request_field_id: field_type}, for typed-answer validation (#302).
     private readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.Dictionary<string, string>> _requestTypeCache = new();
     private Pump? _pump;
@@ -297,6 +301,26 @@ public sealed class CustomerClient
         }
     }
 
+    /// <summary>
+    /// #411 — drop a SERVICE's cached RSA public key, so the next answer or document encrypted to
+    /// it refetches. The mirror of <see cref="InvalidatePublicKey"/> in the service→customer
+    /// direction.
+    /// <para>The changes feed calls this for you on a <c>service_key_rotated</c> event; webhook
+    /// consumers must call it themselves with the body's <c>company_share_code</c> and
+    /// <c>service_share_code</c>. As above, the evicted key is deliberately NOT disposed — an
+    /// in-flight encryption may still hold that instance, and disposing under it would throw.</para>
+    /// </summary>
+    public void InvalidateServiceKey(string companyCode, string serviceCode)
+    {
+        var key = $"{companyCode}/{serviceCode}";
+        lock (_otherLock)
+        {
+            _serviceKeyCache.Remove(key);
+            // Any fetch already in flight must not write its stale result back.
+            _serviceKeyGen[key] = _serviceKeyGen.TryGetValue(key, out var g) ? g + 1 : 1;
+        }
+    }
+
     private Change DecryptChange(Node ev)
     {
         // #344: this cache also stores a negative (null) result, so without invalidation a person
@@ -308,6 +332,18 @@ public sealed class CustomerClient
         {
             var personId = ev.Get("person_user_id").AsString() ?? ev.Get("person_id").AsString();
             if (!string.IsNullOrEmpty(personId)) InvalidatePublicKey(personId!);
+        }
+        // #411: a service this customer connects to replaced its keypair — drop the cached copy so
+        // the next encryption refetches. Same either-key match as above.
+        if (ev.Kind == NodeKind.Object
+            && (ev.Get("event").AsString() == "service_key_rotated" || ev.Get("action").AsString() == "service_key_rotated"))
+        {
+            var companyCode = ev.Get("company_share_code").AsString();
+            var serviceCode = ev.Get("service_share_code").AsString();
+            if (!string.IsNullOrEmpty(companyCode) && !string.IsNullOrEmpty(serviceCode))
+            {
+                InvalidateServiceKey(companyCode!, serviceCode!);
+            }
         }
         return Change.FromApi(ev, _ => null, DecryptAccount);
     }
@@ -400,14 +436,21 @@ public sealed class CustomerClient
         var key = $"{companyCode}/{serviceCode}";
         // TryGetValue, not a null check: a null value is a CACHED NEGATIVE and must count as a
         // hit. Lock only around the dictionary accesses, never the HTTP call.
+        ulong gen;
         lock (_otherLock)
         {
             if (_serviceKeyCache.TryGetValue(key, out var hit)) return hit;
+            _serviceKeyGen.TryGetValue(key, out gen);
         }
         var body = await _http.GetAsync($"{Keys}/{companyCode}/{serviceCode}", null, ct).ConfigureAwait(false);
         var spki = body.Kind == NodeKind.Object && body.Has("public_key") ? body.Get("public_key").AsString() : null;
         var loaded = string.IsNullOrEmpty(spki) ? null : Crypto.LoadPublicKey(spki!);
-        lock (_otherLock) _serviceKeyCache[key] = loaded;
+        // #411: store ONLY if no invalidation happened while the request was in flight.
+        lock (_otherLock)
+        {
+            _serviceKeyGen.TryGetValue(key, out var now);
+            if (now == gen) _serviceKeyCache[key] = loaded;
+        }
         return loaded;
     }
 
