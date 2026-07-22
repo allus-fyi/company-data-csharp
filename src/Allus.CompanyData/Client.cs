@@ -69,6 +69,27 @@ public sealed class Client : IDisposable
     // Recipient RSA public keys (by share_code) — cached for per-person document encryption. A
     // public key is immutable + not a secret (fetched live, never configured).
     private readonly Dictionary<string, RSA> _pubkeyCache = new();
+    /// <summary>
+    /// #344 review pass 2: <see cref="Dictionary{TKey,TValue}"/> is not thread-safe, and
+    /// <see cref="InvalidatePublicKey"/> is documented as something a WEBHOOK consumer calls from its
+    /// own thread — concurrently with an encryption that reads or populates this map. Every access
+    /// takes this lock. It is never held across the HTTP fetch, or concurrent encryptions would
+    /// serialise behind one round-trip. (The Go SDK's equivalent race is what the review caught; the
+    /// same reasoning applies verbatim here.)
+    /// </summary>
+    private readonly object _pubkeyLock = new();
+    /// <summary>
+    /// #344 review pass 3: a per-key GENERATION counter, bumped by every invalidation.
+    /// <para>Locking the dictionary alone is not enough. The fetch path is check (locked) →
+    /// release → HTTP → store (locked), so an <c>InvalidatePublicKey</c> landing between the
+    /// release and the store is silently undone: the pre-rotation key is written back AFTER the
+    /// removal, the <c>key_rotated</c> event has already been consumed, and with no TTL the
+    /// process encrypts to the dead key for the rest of its life — the exact symptom this issue
+    /// exists to fix.</para>
+    /// <para>The fetch snapshots the generation before releasing the lock and stores only if it
+    /// is still current; otherwise it discards its result and the next caller refetches.</para>
+    /// </summary>
+    private readonly Dictionary<string, ulong> _pubkeyGen = new();
 
     // The service RSA public key (public half of the loaded private key), derived once.
     private RSA? _servicePublicKey;
@@ -279,8 +300,44 @@ public sealed class Client : IDisposable
         return items.Where(o => o.Kind == NodeKind.Object).ToList();
     }
 
-    private Change DecryptChange(Node ev) =>
-        Change.FromApi(ev, TypeForSlugImpl, DecryptValueImpl, (url, c) => BinaryFetchImpl(url, c));
+    /// <summary>
+    /// #344 — drop a person's cached RSA public key, by share code.
+    /// </summary>
+    /// <remarks>
+    /// A public key is immutable, so caching one is safe until the person rotates it. Persons learn
+    /// about a rotation from a silent push; a SERVICE gets no pushes at all, so without a signal a
+    /// long-lived worker would keep encrypting to the rotated-away key for its whole lifetime.
+    /// <para>The changes feed calls this for you. Call it yourself when you consume changes over a
+    /// <b>webhook</b> — the verifier is static and has no client instance, so it cannot reach this
+    /// cache: on a <c>key_rotated</c> webhook, call
+    /// <c>client.InvalidatePublicKey(change.ShareCode)</c>.</para>
+    /// <para>The evicted <see cref="RSA"/> is deliberately NOT disposed: an in-flight encryption may
+    /// still hold that instance, and disposing under it would throw. It is collected normally.</para>
+    /// </remarks>
+    public void InvalidatePublicKey(string shareCode)
+    {
+        lock (_pubkeyLock)
+        {
+            _pubkeyCache.Remove(shareCode);
+            // Any fetch already in flight must not write its stale result back.
+            _pubkeyGen[shareCode] = _pubkeyGen.TryGetValue(shareCode, out var g) ? g + 1 : 1;
+        }
+    }
+
+    private Change DecryptChange(Node ev)
+    {
+        // #344: the feed is a service's only rotation signal. Deliberately eventual — nothing
+        // rejects a document encrypted to a stale key, so a window remains until this is drained.
+        // #344: the pull feed names it `event`; a raw webhook body names it `action` (and on
+        // document rows `action` carries signed|accepted|cancelled instead) — so match either key.
+        if (ev.Kind == NodeKind.Object
+            && (ev.Get("event").AsString() == "key_rotated" || ev.Get("action").AsString() == "key_rotated"))
+        {
+            var shareCode = ev.Get("share_code").AsString() ?? ev.Get("id").Get("share_code").AsString();
+            if (!string.IsNullOrEmpty(shareCode)) InvalidatePublicKey(shareCode!);
+        }
+        return Change.FromApi(ev, TypeForSlugImpl, DecryptValueImpl, (url, c) => BinaryFetchImpl(url, c));
+    }
 
     /// <summary>
     /// Drain the changes feed through <paramref name="handler"/> one at a time, crash-safely.
@@ -353,14 +410,23 @@ public sealed class Client : IDisposable
     /// <summary>Fetch + cache the recipient RSA public key by share_code (GET /api/keys/{shareCode}).</summary>
     private async Task<RSA> RecipientPublicKeyAsync(string shareCode, CancellationToken ct = default)
     {
-        if (_pubkeyCache.TryGetValue(shareCode, out var cached))
-            return cached;
+        ulong gen;
+        lock (_pubkeyLock)
+        {
+            if (_pubkeyCache.TryGetValue(shareCode, out var hit)) return hit;
+            _pubkeyGen.TryGetValue(shareCode, out gen);
+        }
         var body = await _http.GetAsync($"{KeysPath}/{shareCode}", ct: ct).ConfigureAwait(false);
         var spki = body.Kind == NodeKind.Object ? body.Get("public_key").AsString() : null;
         if (string.IsNullOrEmpty(spki))
             throw new ApiException(0, "keys.not_found", $"no public_key for share_code {shareCode}");
         var key = Crypto.LoadPublicKey(spki);
-        _pubkeyCache[shareCode] = key;
+        lock (_pubkeyLock)
+        {
+            // Store ONLY if no invalidation happened while the request was in flight.
+            _pubkeyGen.TryGetValue(shareCode, out var now);
+            if (now == gen) _pubkeyCache[shareCode] = key;
+        }
         return key;
     }
 
@@ -1012,6 +1078,6 @@ public sealed class Client : IDisposable
         _privateKey.Dispose();
         _accountKey?.Dispose();
         _servicePublicKey?.Dispose();
-        foreach (var key in _pubkeyCache.Values) key.Dispose();
+        lock (_pubkeyLock) { foreach (var key in _pubkeyCache.Values) key.Dispose(); }
     }
 }

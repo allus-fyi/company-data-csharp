@@ -103,6 +103,27 @@ public sealed class CustomerClient
     private readonly RSA? _accountKey;
     private readonly Func<double, System.Threading.CancellationToken, Task> _sleep;
     private readonly System.Collections.Generic.Dictionary<string, RSA?> _pubKeyCache = new();
+    /// <summary>#344 review pass 2: see Client's _pubkeyLock — same hazard, same remedy.</summary>
+    private readonly object _pubKeyLock = new();
+    /// <summary>
+    /// #344 review pass 3: a per-key GENERATION counter, bumped by every invalidation.
+    /// <para>Locking the dictionary alone is not enough. The fetch path is check (locked) →
+    /// release → HTTP → store (locked), so an <c>InvalidatePublicKey</c> landing between the
+    /// release and the store is silently undone: the pre-rotation key is written back AFTER the
+    /// removal, the <c>key_rotated</c> event has already been consumed, and with no TTL the
+    /// process encrypts to the dead key for the rest of its life — the exact symptom this issue
+    /// exists to fix.</para>
+    /// <para>The fetch snapshots the generation before releasing the lock and stores only if it
+    /// is still current; otherwise it discards its result and the next caller refetches.</para>
+    /// </summary>
+    private readonly System.Collections.Generic.Dictionary<string, ulong> _pubKeyGen = new();
+    /// <summary>
+    /// #344 review pass 3: _serviceKeyCache and _requestTypeCache sit on the same concurrent
+    /// encryption paths as _pubKeyCache, so an unsynchronised Dictionary corrupts under concurrent
+    /// read+write. Neither has an invalidator, so neither needs a generation counter — but adding
+    /// one later MUST bring a generation with it.
+    /// </summary>
+    private readonly object _otherLock = new();
     private readonly System.Collections.Generic.Dictionary<string, RSA?> _serviceKeyCache = new();
     // "companyCode/serviceCode" → {request_field_id: field_type}, for typed-answer validation (#302).
     private readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.Dictionary<string, string>> _requestTypeCache = new();
@@ -260,7 +281,36 @@ public sealed class CustomerClient
         return items.Where(o => o.Kind == NodeKind.Object).ToList();
     }
 
-    private Change DecryptChange(Node ev) => Change.FromApi(ev, _ => null, DecryptAccount);
+    /// <summary>
+    /// #344 — drop a person's cached RSA public key, by user id. See
+    /// <see cref="Client.InvalidatePublicKey"/>; the changes feed calls this for you, webhook
+    /// consumers must call it themselves. The evicted key is not disposed (an in-flight
+    /// encryption may still hold it).
+    /// </summary>
+    public void InvalidatePublicKey(string userId)
+    {
+        lock (_pubKeyLock)
+        {
+            _pubKeyCache.Remove(userId);
+            // Any fetch already in flight must not write its stale result back.
+            _pubKeyGen[userId] = _pubKeyGen.TryGetValue(userId, out var g) ? g + 1 : 1;
+        }
+    }
+
+    private Change DecryptChange(Node ev)
+    {
+        // #344: this cache also stores a negative (null) result, so without invalidation a person
+        // who had not generated keys yet would stay unresolvable for the process lifetime too.
+        // #344: the pull feed names it `event`; a raw webhook body names it `action` (and on
+        // document rows `action` carries signed|accepted|cancelled instead) — so match either key.
+        if (ev.Kind == NodeKind.Object
+            && (ev.Get("event").AsString() == "key_rotated" || ev.Get("action").AsString() == "key_rotated"))
+        {
+            var personId = ev.Get("person_user_id").AsString() ?? ev.Get("person_id").AsString();
+            if (!string.IsNullOrEmpty(personId)) InvalidatePublicKey(personId!);
+        }
+        return Change.FromApi(ev, _ => null, DecryptAccount);
+    }
 
     public Task ProcessChangesAsync(Func<Change, Task> handler, ProcessOptions? options = null, System.Threading.CancellationToken ct = default)
         => Pump.ProcessChangesAsync(handler, options, ct);
@@ -300,7 +350,10 @@ public sealed class CustomerClient
     private async Task<Dictionary<string, string>> RequestFieldTypesAsync(string companyCode, string serviceCode, System.Threading.CancellationToken ct)
     {
         var key = $"{companyCode}/{serviceCode}";
-        if (_requestTypeCache.TryGetValue(key, out var cached)) return cached;
+        lock (_otherLock)
+        {
+            if (_requestTypeCache.TryGetValue(key, out var cached)) return cached;
+        }
         var map = new Dictionary<string, string>();
         try
         {
@@ -318,7 +371,7 @@ public sealed class CustomerClient
             }
         }
         catch (ApiException) { /* best-effort — skip validation when unavailable */ }
-        _requestTypeCache[key] = map;
+        lock (_otherLock) _requestTypeCache[key] = map;
         return map;
     }
 
@@ -345,30 +398,43 @@ public sealed class CustomerClient
     private async Task<RSA?> ServiceKeyAsync(string companyCode, string serviceCode, System.Threading.CancellationToken ct)
     {
         var key = $"{companyCode}/{serviceCode}";
-        if (!_serviceKeyCache.TryGetValue(key, out var cached))
+        // TryGetValue, not a null check: a null value is a CACHED NEGATIVE and must count as a
+        // hit. Lock only around the dictionary accesses, never the HTTP call.
+        lock (_otherLock)
         {
-            var body = await _http.GetAsync($"{Keys}/{companyCode}/{serviceCode}", null, ct).ConfigureAwait(false);
-            var spki = body.Kind == NodeKind.Object && body.Has("public_key") ? body.Get("public_key").AsString() : null;
-            cached = string.IsNullOrEmpty(spki) ? null : Crypto.LoadPublicKey(spki!);
-            _serviceKeyCache[key] = cached;
+            if (_serviceKeyCache.TryGetValue(key, out var hit)) return hit;
         }
-        return cached;
+        var body = await _http.GetAsync($"{Keys}/{companyCode}/{serviceCode}", null, ct).ConfigureAwait(false);
+        var spki = body.Kind == NodeKind.Object && body.Has("public_key") ? body.Get("public_key").AsString() : null;
+        var loaded = string.IsNullOrEmpty(spki) ? null : Crypto.LoadPublicKey(spki!);
+        lock (_otherLock) _serviceKeyCache[key] = loaded;
+        return loaded;
     }
 
     private async Task<RSA?> BatchKeyAsync(string userId, System.Threading.CancellationToken ct)
     {
-        if (!_pubKeyCache.TryGetValue(userId, out var cached))
+        // TryGetValue, not a null check: a null value is a CACHED NEGATIVE (person has no key yet)
+        // and must still count as a hit. Lock only around the map accesses, never the HTTP call.
+        ulong gen;
+        lock (_pubKeyLock)
         {
-            var body = await _http.PostAsync($"{Keys}/batch",
-                jsonBody: new Dictionary<string, object?> { ["user_ids"] = new[] { userId } }, ct: ct).ConfigureAwait(false);
-            string? spki = null;
-            if (body.Kind == NodeKind.Object && body.Has("keys"))
-            {
-                var keys = body.Get("keys");
-                if (keys.Kind == NodeKind.Object && keys.Has(userId)) spki = keys.Get(userId).AsString();
-            }
-            cached = string.IsNullOrEmpty(spki) ? null : Crypto.LoadPublicKey(spki!);
-            _pubKeyCache[userId] = cached;
+            if (_pubKeyCache.TryGetValue(userId, out var hit)) return hit;
+            _pubKeyGen.TryGetValue(userId, out gen);
+        }
+        var body = await _http.PostAsync($"{Keys}/batch",
+            jsonBody: new Dictionary<string, object?> { ["user_ids"] = new[] { userId } }, ct: ct).ConfigureAwait(false);
+        string? spki = null;
+        if (body.Kind == NodeKind.Object && body.Has("keys"))
+        {
+            var keys = body.Get("keys");
+            if (keys.Kind == NodeKind.Object && keys.Has(userId)) spki = keys.Get(userId).AsString();
+        }
+        var cached = string.IsNullOrEmpty(spki) ? null : Crypto.LoadPublicKey(spki!);
+        lock (_pubKeyLock)
+        {
+            // Store ONLY if no invalidation happened while the request was in flight.
+            _pubKeyGen.TryGetValue(userId, out var now);
+            if (now == gen) _pubKeyCache[userId] = cached;
         }
         return cached;
     }

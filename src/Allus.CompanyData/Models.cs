@@ -294,6 +294,9 @@ public sealed record Change(
     /// <summary>#311: true iff a field_updated value is verified (hash matches the decrypted plaintext).</summary>
     public bool Verified { get; init; }
 
+    /// <summary>#344: set on <c>key_rotated</c> — SHA-256 fingerprint of the person's NEW public key.</summary>
+    public string? PublicKeySha256 { get; init; }
+
     public static Change FromApi(
         Node obj,
         TypeForSlug typeForSlug,
@@ -335,6 +338,7 @@ public sealed record Change(
             Raw = obj.ToObjectGraph(),
             CustomerType = obj.Get("customer_type").AsString(),
             Verified = Value.VerifiedFrom(obj, value),
+            PublicKeySha256 = ev == "key_rotated" ? obj.Get("public_key_sha256").AsString() : null,
         };
     }
 
