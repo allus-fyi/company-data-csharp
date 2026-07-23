@@ -112,6 +112,11 @@ public sealed class Client : IDisposable
         _accountKey = Webhooks.LoadAccountKey(config);
     }
 
+    private TwoFactorClient? _twoFactor;
+
+    /// <summary>#436 2FA-by-allme — the relying-party challenge API (<c>TwoFactor.ChallengeAsync</c> / <c>.ResultAsync</c>).</summary>
+    public TwoFactorClient TwoFactor => _twoFactor ??= new TwoFactorClient(_http);
+
     // ── constructors (config-only keys) ────────────────────────────────────────────────────────
 
     /// <summary>Build from a JSON config file (env vars override secrets).</summary>

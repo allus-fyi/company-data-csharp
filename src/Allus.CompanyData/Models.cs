@@ -324,7 +324,9 @@ public sealed record Change(
             ValueObj: value,
             Live: live,
             DocumentId: obj.Get("document_id").AsString(),
-            Status: ev == "document_status_changed" ? obj.Get("status").AsString() : null,
+            // #436: 2fa_challenge_completed carries the outcome in Status (approved|denied|revoked); its
+            // challenge_id/completed_at stay in Raw. The poll is the record (spec §3).
+            Status: (ev == "document_status_changed" || ev == "2fa_challenge_completed") ? obj.Get("status").AsString() : null,
             Action: ev == "document_status_changed" ? obj.Get("action").AsString() : null,
             Note: ev == "document_status_changed" ? obj.Get("note").AsString() : null,
             Method: ev == "document_status_changed" ? obj.Get("method").AsString() : null,
