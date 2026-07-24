@@ -115,7 +115,7 @@ public sealed class Client : IDisposable
     private TwoFactorClient? _twoFactor;
 
     /// <summary>#436 2FA-by-allme — the relying-party challenge API (<c>TwoFactor.ChallengeAsync</c> / <c>.ResultAsync</c>).</summary>
-    public TwoFactorClient TwoFactor => _twoFactor ??= new TwoFactorClient(_http);
+    public TwoFactorClient TwoFactor => _twoFactor ??= new TwoFactorClient(_http, _sleep);
 
     // ── constructors (config-only keys) ────────────────────────────────────────────────────────
 

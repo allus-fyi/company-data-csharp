@@ -169,4 +169,40 @@ public class OAuthTests
         var ex = await Assert.ThrowsAsync<ApiException>(() => c.PollResultAsync("DET1", 5, 0));
         Assert.Equal(410, ex.Status);
     }
+
+    // ── #481: 2fa_enroll mode + detached enrollment poll delivery ──────────
+    [Fact]
+    public void AuthorizeUrlAccepts2faEnrollMode()
+    {
+        var c = new OAuthClient(IdwCfg(), new QueueTransport());
+        var (_, q) = ParseUrl(c.AuthorizeUrl("2fa_enroll", responseMode: "detached", state: "EN1"));
+        Assert.Equal("2fa_enroll", q["mode"]);
+        Assert.Equal("detached", q["response_mode"]);
+    }
+
+    [Fact]
+    public async Task PollResultPendingThenEnrolled()
+    {
+        // #481: a detached 2fa_enroll delivers {enrolled: true, state}, NOT a code. PollResultAsync
+        // must return on the `enrolled` sentinel — otherwise it consumes the one-shot result and times out.
+        var t = new QueueTransport();
+        t.PostResponses.Enqueue(Resp.Text(202, ""));
+        t.PostResponses.Enqueue(Resp.Json(200, new { enrolled = true, state = "EN1" }));
+        var c = new OAuthClient(IdwCfg(), t, sleep: _ => Task.CompletedTask);
+        var res = await c.PollResultAsync("EN1", timeoutSeconds: 5, intervalSeconds: 0);
+        Assert.True(res.GetProperty("enrolled").GetBoolean());
+        Assert.Equal("EN1", res.GetProperty("state").GetString());
+        Assert.Equal(2, t.Posts.Count); // returned on first delivery, never polled past it
+    }
+
+    [Fact]
+    public async Task PollResultStillReturnsOnCodeAfterEnrollChange()
+    {
+        // Regression: the enroll addition must not break the sign-in `code` delivery.
+        var t = new QueueTransport();
+        t.PostResponses.Enqueue(Resp.Json(200, new { code = "AUTHCODE", state = "DET1" }));
+        var c = new OAuthClient(IdwCfg(), t, sleep: _ => Task.CompletedTask);
+        var res = await c.PollResultAsync("DET1", timeoutSeconds: 5, intervalSeconds: 0);
+        Assert.Equal("AUTHCODE", res.GetProperty("code").GetString());
+    }
 }

@@ -164,6 +164,27 @@ public class HttpTests
     }
 
     [Fact]
+    public async Task Status429PendingCapSurfacesImmediatelyWithoutRetry()
+    {
+        // #481: a twofa.pending_cap 429 can never be cleared by a retry — it must surface at once as
+        // ApiException, NOT go through the Retry-After backoff (which every other 429 gets).
+        var t = new QueueTransport();
+        t.PostResponses.Enqueue(Resp.TokenOk());
+        t.GetResponses.Enqueue(Resp.Json(429, new { error_key = "twofa.pending_cap" },
+            new Dictionary<string, string> { ["Retry-After"] = "2" }));
+        t.GetResponses.Enqueue(Resp.Json(200, new { should = "not be reached" }));
+        var sleeps = new List<double>();
+        var c = MakeClient(t, sleeps: sleeps);
+
+        var ex = await Assert.ThrowsAsync<ApiException>(() => c.GetAsync("/api/service-2fa/challenges"));
+        Assert.Equal(429, ex.Status);
+        Assert.Equal("twofa.pending_cap", ex.ErrorKey);
+        Assert.IsNotType<RateLimitException>(ex); // immediate ApiException, not the 429 rate-limit path
+        Assert.Empty(sleeps);          // no backoff sleep
+        Assert.Single(t.Gets);         // no retry — the 200 was never consumed
+    }
+
+    [Fact]
     public async Task Status429DefaultBackoffWhenNoRetryAfter()
     {
         var t = new QueueTransport();

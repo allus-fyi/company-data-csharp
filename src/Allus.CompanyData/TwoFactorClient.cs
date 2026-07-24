@@ -50,8 +50,14 @@ public sealed record TwoFactorResult(
 public sealed class TwoFactorClient
 {
     private readonly ApiHttp _http;
+    // Injectable so WaitForResultAsync is unit-testable without real delays (matches ApiHttp/Client).
+    private readonly Func<double, CancellationToken, Task> _sleep;
 
-    internal TwoFactorClient(ApiHttp http) => _http = http;
+    internal TwoFactorClient(ApiHttp http, Func<double, CancellationToken, Task>? sleep = null)
+    {
+        _http = http;
+        _sleep = sleep ?? (async (s, ct) => await Task.Delay(TimeSpan.FromSeconds(s), ct).ConfigureAwait(false));
+    }
 
     /// <summary>Initiate a login-approval challenge for the person behind <paramref name="shareCode"/>.</summary>
     /// <param name="shareCode">The person's profile share code.</param>
@@ -79,5 +85,30 @@ public sealed class TwoFactorClient
         var body = await _http.GetAsync(
             $"/api/service-2fa/challenges/{Uri.EscapeDataString(challengeId)}", null, ct).ConfigureAwait(false);
         return TwoFactorResult.FromApi(body);
+    }
+
+    /// <summary>
+    /// Poll <see cref="ResultAsync"/> until the status is terminal (no longer <c>pending</c>) and return
+    /// that first terminal <see cref="TwoFactorResult"/>.
+    ///
+    /// Convenience over a manual <see cref="ResultAsync"/> loop (#481; mirrors the detached
+    /// <c>PollResultAsync</c> precedent). Because the first terminal read burns the challenge, this returns
+    /// as soon as the status leaves <c>pending</c> — it never re-reads a consumed result. Throws
+    /// <see cref="ApiException"/> if <paramref name="timeoutSeconds"/> elapse while still pending;
+    /// <paramref name="intervalSeconds"/> is the seconds between polls.
+    /// </summary>
+    public async Task<TwoFactorResult> WaitForResultAsync(
+        string challengeId, int timeoutSeconds = 600, int intervalSeconds = 2, CancellationToken ct = default)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+        while (true)
+        {
+            var res = await ResultAsync(challengeId, ct).ConfigureAwait(false);
+            if (res.Status != "pending")
+                return res;
+            if (DateTime.UtcNow >= deadline)
+                throw new ApiException(0, null, $"2FA challenge {challengeId} not completed within {timeoutSeconds}s");
+            await _sleep(intervalSeconds, ct).ConfigureAwait(false);
+        }
     }
 }

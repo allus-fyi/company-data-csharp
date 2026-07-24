@@ -243,6 +243,12 @@ public sealed class ApiHttp
 
             if (status == 429)
             {
+                var (errorKey, message) = ExtractError(resp);
+                // #481: a pending-cap 429 means the caller already holds the maximum concurrent 2FA
+                // challenges — a retry can never clear that, so surface it immediately as an
+                // ApiException instead of the blind Retry-After backoff every other 429 gets.
+                if (errorKey == "twofa.pending_cap")
+                    throw new ApiException(status, errorKey, message);
                 var retryAfter = ParseRetryAfter(resp);
                 if (retries429 < _maxRetries429)
                 {
@@ -250,7 +256,6 @@ public sealed class ApiHttp
                     await _sleep(BackoffDelay(retryAfter, retries429), ct).ConfigureAwait(false);
                     continue;
                 }
-                var (errorKey, message) = ExtractError(resp);
                 throw new RateLimitException(retryAfter, errorKey, message);
             }
 

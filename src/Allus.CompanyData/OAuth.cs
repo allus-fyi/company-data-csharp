@@ -33,7 +33,7 @@ public sealed class OAuthClient
 
     private static readonly HashSet<string> NonClaimable = new() { "photo", "document", "legal_document" };
     private const int MaxClaims = 15;
-    private static readonly HashSet<string> Modes = new() { "signin", "one_time", "connect" };
+    private static readonly HashSet<string> Modes = new() { "signin", "one_time", "connect", "2fa_enroll" };
     private static readonly HashSet<string> ResponseModes = new() { "redirect", "detached" };
 
     private readonly Config _config;
@@ -75,7 +75,7 @@ public sealed class OAuthClient
         string? redirectUri = null)
     {
         if (!Modes.Contains(mode))
-            throw new ConfigException($"invalid mode '{mode}' (expected signin | one_time | connect)");
+            throw new ConfigException($"invalid mode '{mode}' (expected signin | one_time | connect | 2fa_enroll)");
         if (!ResponseModes.Contains(responseMode))
             throw new ConfigException($"invalid responseMode '{responseMode}' (expected redirect | detached)");
 
@@ -173,7 +173,12 @@ public sealed class OAuthClient
         return outMap;
     }
 
-    /// <summary>Poll /oauth2/result for a detached sign-in (single-delivery).</summary>
+    /// <summary>
+    /// Poll /oauth2/result for a detached sign-in or enrollment (single-delivery). A detached sign-in
+    /// returns <c>{code, state}</c>; a detached <c>2fa_enroll</c> returns <c>{enrolled: true, state}</c>
+    /// (#481). Returns on the first delivered shape (<c>code</c> OR <c>enrolled</c>) and never polls past
+    /// it, so a one-shot enrollment result is not consumed and lost.
+    /// </summary>
     public async Task<JsonElement> PollResultAsync(string state, int timeoutSeconds = 600, int intervalSeconds = 2, CancellationToken ct = default)
     {
         var form = new Dictionary<string, string> { ["client_id"] = _config.OAuthClientId!, ["state"] = state };
@@ -185,7 +190,11 @@ public sealed class OAuthClient
             if (res.StatusCode == 200)
             {
                 var body = ParseObject(res.Body);
-                if (body.TryGetProperty("code", out _)) return body;
+                // #481: return on the first delivered terminal shape — a sign-in `code` OR a
+                // `2fa_enroll` `enrolled` sentinel ({enrolled: true, state}). Both are one-shot;
+                // returning here (rather than looping) keeps an enrollment result from being consumed
+                // and lost to a timeout.
+                if (body.TryGetProperty("code", out _) || body.TryGetProperty("enrolled", out _)) return body;
             }
             else if (res.StatusCode == 410)
             {
