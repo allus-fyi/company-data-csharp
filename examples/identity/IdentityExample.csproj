@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    Identity example (sign-in / OIDC / 2FA) for the allus company-data C# SDK.
+
+    Its OWN project — a standalone console app that hosts a thin localhost backend
+    implementing the demo-backend contract v1 (see README.md). It references the SDK
+    by PROJECT reference (../../src) so a reader sees which SDK call implements each
+    scenario. It is NOT part of the published Allus.CompanyData NuGet package: it is
+    a separate project, is not in Allus.CompanyData.slnx, and `dotnet pack` on the
+    SDK never sees it.
+
+    The OIDC scenarios (5/6) use the standard third-party IdentityModel.OidcClient —
+    that a real OIDC client drives them is the point of the #314 demonstration.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Allus.IdentityExample</RootNamespace>
+    <AssemblyName>allus-identity-example</AssemblyName>
+    <!-- Never pack/publish this example as a NuGet package. -->
+    <IsPackable>false</IsPackable>
+    <!-- Built against the net8.0 LTS surface; roll forward so it runs on any installed >= 8 runtime. -->
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The SDK under test — the intended top-level surface each handler calls. -->
+    <ProjectReference Include="../../src/Allus.CompanyData/Allus.CompanyData.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Standard .NET OIDC client for scenarios 5/6 (discovery + PKCE + id_token
+         verification; client_secret_post; issuer/endpoint override for local stacks). -->
+    <PackageReference Include="IdentityModel.OidcClient" Version="6.0.0" />
+  </ItemGroup>
+
+</Project>
