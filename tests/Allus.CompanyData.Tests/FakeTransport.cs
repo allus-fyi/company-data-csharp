@@ -9,13 +9,22 @@ namespace Allus.CompanyData.Tests;
 public static class Resp
 {
     public static HttpResult Ok(string body, IDictionary<string, string>? headers = null) =>
-        new() { StatusCode = 200, Body = body, Headers = AsDict(headers) };
+        new() { StatusCode = 200, Body = body, BodyBytes = System.Text.Encoding.UTF8.GetBytes(body), Headers = AsDict(headers) };
 
-    public static HttpResult Json(int status, object jsonBody, IDictionary<string, string>? headers = null) =>
-        new() { StatusCode = status, Body = System.Text.Json.JsonSerializer.Serialize(jsonBody), Headers = AsDict(headers) };
+    public static HttpResult Json(int status, object jsonBody, IDictionary<string, string>? headers = null)
+    {
+        var body = System.Text.Json.JsonSerializer.Serialize(jsonBody);
+        return new() { StatusCode = status, Body = body, BodyBytes = System.Text.Encoding.UTF8.GetBytes(body), Headers = AsDict(headers) };
+    }
 
     public static HttpResult Text(int status, string text, IDictionary<string, string>? headers = null) =>
-        new() { StatusCode = status, Body = text, Headers = AsDict(headers) };
+        new() { StatusCode = status, Body = text, BodyBytes = System.Text.Encoding.UTF8.GetBytes(text), Headers = AsDict(headers) };
+
+    /// <summary>A raw-bytes response (e.g. a broadcast document's plaintext file) — <see cref="Body"/> is
+    /// left as a best-effort UTF-8 decode for parity with the live transport; callers exercising
+    /// <c>GetRawAsync</c> read <see cref="BodyBytes"/> only.</summary>
+    public static HttpResult Bytes(int status, byte[] bytes, IDictionary<string, string>? headers = null) =>
+        new() { StatusCode = status, Body = System.Text.Encoding.UTF8.GetString(bytes), BodyBytes = bytes, Headers = AsDict(headers) };
 
     public static HttpResult TokenOk() =>
         Json(200, new { access_token = "tok-123", token_type = "Bearer", expires_in = 3600 });

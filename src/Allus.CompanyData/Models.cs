@@ -464,6 +464,13 @@ public sealed record Document(
 }
 
 /// <summary>
+/// #491 gap 3: the calling client's own service identity, from <c>GET /api/company-data/whoami</c>.
+/// <see cref="CompanyUserId"/> is the company user the client is bound to (the value a flow-run
+/// binding's company party must use); <see cref="ServiceId"/> is its service.
+/// </summary>
+public sealed record Identity(string? CompanyUserId, string? ServiceId);
+
+/// <summary>
 /// A contract-flow run (company-data side). The company is one of the two bound parties.
 /// <see cref="Bindings"/> maps each party key to the bound user_id (the company's own is
 /// <see cref="CompanyUserId"/>); <see cref="Answers"/> are the per-party encrypted answer copies

@@ -645,6 +645,14 @@ foreach (var d in docs)
 // Fetch one by id.
 var doc = await client.DocumentAsync(contract.Id!);
 
+// #491: download a FILE document's bytes (metadata methods don't include them).
+// A BROADCAST (plaintext) document's bytes are returned as-is. A PER-PERSON /
+// private document is encrypted to the RECIPIENT's key (not your service key), so
+// DocumentFileAsync throws ApiException("documents.recipient_encrypted") instead of
+// attempting a doomed service-key decrypt. For a generated flow contract's own
+// copy, use FlowRunDocumentAsync(runId) instead — that copy IS service-key-encrypted.
+byte[] pdf = await client.DocumentFileAsync(contract.Id!);
+
 // Advance its lifecycle status.
 await client.UpdateDocumentStatusAsync(contract.Id!,
     "active");   // offering | ready_to_sign | active | active_but_ending | ended
@@ -657,6 +665,33 @@ await client.UpdateDocumentMetadataAsync(contract.Id!,
 // Delete the document (and its on-disk file).
 await client.DeleteDocumentAsync(contract.Id!);
 ```
+
+### Contract flows & identity (#491)
+
+```csharp
+Dictionary<string, object?> FlowRunAnswers(FlowRun run)                              // #491 gap 1 — a completed run's DECRYPTED answers {slug: plaintext}
+Task<byte[]> FlowRunDocumentAsync(string runId, CancellationToken ct = default)       // #491 gap 2 — the company's own copy of a run's generated contract (plaintext bytes)
+Task<Identity> IdentityAsync(CancellationToken ct = default)                          // #491 gap 3 — this client's {CompanyUserId, ServiceId}
+```
+
+```csharp
+var run = await client.FlowRunAsync(runId);
+Dictionary<string, object?> answers = client.FlowRunAnswers(run);   // {"work_email": "alice@example.com", …}
+
+byte[] pdf = await client.FlowRunDocumentAsync(runId);              // 404 (ApiException) until the run generates a document
+
+Identity me = await client.IdentityAsync();
+var bindings = new Dictionary<string, string>
+{
+    ["company"] = me.CompanyUserId,   // the COMPANY party binds to your own user id
+    ["person"] = connection.PersonId,
+};
+await client.TriggerFlowRunAsync(flowId, connection.Id!, bindings);
+```
+
+* `FlowRunAnswers(run)` returns a completed run's decrypted `{slug: plaintext}` answers (pass a fetched `FlowRun`). It is the public accessor for a finished run's answers, which `ProcessFlowRunAsync` returns untouched.
+* `FlowRunDocumentAsync(runId)` downloads the company's own service-key-encrypted copy of a run's generated contract and returns the plaintext file bytes (`404` until the run generates a document) — the honest completion step (fill → complete → `FlowRunAnswers` → `FlowRunDocumentAsync`).
+* `IdentityAsync()` returns this client's `{CompanyUserId, ServiceId}` from `GET /api/company-data/whoami`, so a `TriggerFlowRunAsync` binding's **company** party can bind to `CompanyUserId` (the person party's user id comes from the connection).
 
 ### Reacting to status changes in the pump
 

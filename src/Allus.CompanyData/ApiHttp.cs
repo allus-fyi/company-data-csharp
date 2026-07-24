@@ -164,13 +164,47 @@ public sealed class ApiHttp
         => RequestAsync("DELETE", path, ct: ct);
 
     /// <summary>
-    /// The shared request loop for every verb. Adds the bearer token + an Accept header matching
-    /// <c>Config.Format</c>, carries an optional JSON or raw-bytes body, parses JSON or XML, and maps
-    /// non-2xx responses to the SDK errors: 401 → one refresh-and-retry then <see cref="AuthException"/>;
-    /// 429 → bounded Retry-After backoff then <see cref="RateLimitException"/>; other non-2xx →
-    /// <see cref="ApiException"/> (carrying the body's <c>error_key</c> when present).
+    /// GET <paramref name="path"/> returning the RAW 2xx response body BYTES — NO JSON/XML parse.
+    /// For downloading file bytes whose body may be non-JSON (a broadcast document's plaintext) —
+    /// see <see cref="Client.DocumentFileAsync"/>. Auth/refresh/retry handling is identical to
+    /// <see cref="GetAsync"/>.
+    /// </summary>
+    public async Task<byte[]> GetRawAsync(
+        string path,
+        IReadOnlyDictionary<string, string>? query = null,
+        CancellationToken ct = default)
+    {
+        var resp = await RequestCoreAsync("GET", path, query: query, ct: ct).ConfigureAwait(false);
+        return resp.BodyBytes;
+    }
+
+    /// <summary>
+    /// GET/POST/PUT/DELETE → a parsed <see cref="Node"/>. Thin wrapper over
+    /// <see cref="RequestCoreAsync"/> that additionally parses the successful body as JSON/XML.
     /// </summary>
     private async Task<Node> RequestAsync(
+        string method,
+        string path,
+        IReadOnlyDictionary<string, string>? query = null,
+        object? jsonBody = null,
+        byte[]? rawBody = null,
+        string? contentType = null,
+        CancellationToken ct = default)
+    {
+        var resp = await RequestCoreAsync(method, path, query, jsonBody, rawBody, contentType, ct).ConfigureAwait(false);
+        return ParseBody(resp, _config.Format == "xml");
+    }
+
+    /// <summary>
+    /// The shared request loop for every verb (GET/raw included). Adds the bearer token + an Accept
+    /// header matching <c>Config.Format</c>, carries an optional JSON or raw-bytes body, and maps
+    /// non-2xx responses to the SDK errors: 401 → one refresh-and-retry then <see cref="AuthException"/>;
+    /// 429 → bounded Retry-After backoff then <see cref="RateLimitException"/>; other non-2xx →
+    /// <see cref="ApiException"/> (carrying the body's <c>error_key</c> when present). Returns the raw
+    /// successful <see cref="HttpResult"/> — <see cref="RequestAsync"/> parses it, <see cref="GetRawAsync"/>
+    /// returns its bytes untouched.
+    /// </summary>
+    private async Task<HttpResult> RequestCoreAsync(
         string method,
         string path,
         IReadOnlyDictionary<string, string>? query = null,
@@ -224,7 +258,7 @@ public sealed class ApiHttp
             var status = resp.StatusCode;
 
             if (status is >= 200 and < 300)
-                return ParseBody(resp, wantsXml);
+                return resp;
 
             if (status == 401)
             {

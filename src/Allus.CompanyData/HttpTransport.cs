@@ -8,11 +8,17 @@ using System.Net.Http.Headers;
 
 namespace Allus.CompanyData;
 
-/// <summary>A raw HTTP response: status, headers, and the body text.</summary>
+/// <summary>A raw HTTP response: status, headers, the body text, and the body's raw bytes.</summary>
 public sealed class HttpResult
 {
     public int StatusCode { get; init; }
     public string Body { get; init; } = string.Empty;
+    /// <summary>
+    /// The body's undecoded bytes — what <see cref="ApiHttp.GetRawAsync"/> returns as-is (a broadcast
+    /// document's plaintext file bytes may not be valid UTF-8, so <see cref="Body"/> alone would lose
+    /// data on a decode/re-encode round trip).
+    /// </summary>
+    public byte[] BodyBytes { get; init; } = Array.Empty<byte>();
     public IReadOnlyDictionary<string, string> Headers { get; init; } =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -110,7 +116,11 @@ public sealed class HttpTransport : IHttpTransport
     private async Task<HttpResult> SendAsync(HttpRequestMessage req, CancellationToken ct)
     {
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
-        var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        // Read the bytes ONCE — BodyBytes is the byte-safe original (a broadcast document's plaintext
+        // file may not be valid UTF-8); Body is the best-effort text decode every JSON/XML/error-message
+        // path already assumes.
+        var bytes = await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+        var body = bytes.Length == 0 ? string.Empty : System.Text.Encoding.UTF8.GetString(bytes);
         var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var h in resp.Headers) headers[h.Key] = string.Join(",", h.Value);
         foreach (var h in resp.Content.Headers) headers[h.Key] = string.Join(",", h.Value);
@@ -118,6 +128,7 @@ public sealed class HttpTransport : IHttpTransport
         {
             StatusCode = (int)resp.StatusCode,
             Body = body,
+            BodyBytes = bytes,
             Headers = headers,
         };
     }

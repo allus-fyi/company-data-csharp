@@ -635,6 +635,72 @@ public sealed class Client : IDisposable
         return Document.FromApi(DocObj(body), DecryptValueImpl);
     }
 
+    /// <summary>
+    /// #491 gap 2: download a document's file BYTES. <see cref="DocumentAsync"/> returns metadata only.
+    /// This GETs <c>/documents/{id}/file</c> and branches on the document's storage mode (server
+    /// contract):
+    /// <list type="bullet">
+    /// <item>a BROADCAST (non-private) document is stored plaintext and served as RAW bytes → returned
+    /// as-is;</item>
+    /// <item>a PER-PERSON / private document is encrypted to the RECIPIENT's key and served as
+    /// <c>{"encrypted":true,"value":{"_enc":1,…}}</c> — the company CANNOT decrypt that with its
+    /// service key, so this fails clearly (<see cref="ApiException"/> <c>documents.recipient_encrypted</c>)
+    /// rather than attempting a doomed service-key decrypt. For a generated flow contract's OWN copy
+    /// the company uses <see cref="FlowRunDocumentAsync"/> — that copy IS service-key-encrypted.</item>
+    /// </list>
+    /// </summary>
+    public async Task<byte[]> DocumentFileAsync(string documentId, CancellationToken ct = default)
+    {
+        var raw = await _http.GetRawAsync($"{DocumentsPath}/{documentId}/file", ct: ct).ConfigureAwait(false);
+        if (IsRecipientEncryptedResponse(raw))
+        {
+            throw new ApiException(
+                0,
+                "documents.recipient_encrypted",
+                "This document is encrypted to its recipient and is not readable with the company service key. "
+                + "For a generated flow contract, use FlowRunDocumentAsync(runId) to download the company copy.");
+        }
+        return raw; // broadcast / plaintext bytes
+    }
+
+    /// <summary>
+    /// True when <paramref name="raw"/> parses as a JSON object with a truthy <c>encrypted</c>
+    /// property — the per-person/private document response shape
+    /// <c>{"encrypted":true,"value":{"_enc":1,...}}</c>. Any parse failure (the broadcast/plaintext
+    /// case, e.g. raw PDF bytes) is treated as "not encrypted" — the bytes ARE the file.
+    /// </summary>
+    private static bool IsRecipientEncryptedResponse(byte[] raw)
+    {
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(raw);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+        using (doc)
+        {
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+            if (!doc.RootElement.TryGetProperty("encrypted", out var enc)) return false;
+            return IsTruthy(enc);
+        }
+    }
+
+    /// <summary>PHP-style loose truthiness for the <c>encrypted</c> flag's JSON value.</summary>
+    private static bool IsTruthy(JsonElement el) => el.ValueKind switch
+    {
+        JsonValueKind.True => true,
+        JsonValueKind.False => false,
+        JsonValueKind.Null => false,
+        JsonValueKind.Number => el.TryGetDouble(out var d) && d != 0,
+        JsonValueKind.String => el.GetString() is { Length: > 0 } s && s != "0",
+        JsonValueKind.Object => el.EnumerateObject().MoveNext(),
+        JsonValueKind.Array => el.GetArrayLength() > 0,
+        _ => false,
+    };
+
     /// <summary>Set a document's lifecycle status (offering|ready_to_sign|active|active_but_ending|ended).</summary>
     public async Task<Document> UpdateDocumentStatusAsync(string documentId, string status, CancellationToken ct = default)
     {
@@ -728,6 +794,41 @@ public sealed class Client : IDisposable
     {
         var body = await _http.GetAsync($"{FlowRunsPath}/{runId}", ct: ct).ConfigureAwait(false);
         return FlowRun.FromApi(body);
+    }
+
+    /// <summary>
+    /// #491 gap 1: a completed run's DECRYPTED answers as <c>{slug: plaintext}</c>. Decrypts the
+    /// company's service-key answer copies of an already-fetched run — the public accessor for a
+    /// finished run's answers, since the private <c>DecryptRunAnswers</c> it wraps is otherwise
+    /// reached only inside <see cref="ProcessFlowRunAsync"/>, which returns an already-completed run
+    /// untouched. Fetch the run with <see cref="FlowRunAsync"/> first, then pass it here.
+    /// </summary>
+    public Dictionary<string, object?> FlowRunAnswers(FlowRun run) => DecryptRunAnswers(run);
+
+    /// <summary>
+    /// #491 gap 2: download the company's OWN copy of a run's generated flow contract — the PLAINTEXT
+    /// file bytes. GETs <c>/flow-runs/{runId}/document/file</c>, which serves the company-party copy
+    /// encrypted to the SERVICE key (unlike <see cref="DocumentFileAsync"/>'s recipient-targeted copy),
+    /// so the same <see cref="BinaryHandle"/> the slot-file download uses decrypts it → the
+    /// <c>{"file":"data:…;base64,…"}</c> envelope → the file bytes. A 404 (<see cref="ApiException"/>)
+    /// surfaces when the run has not generated a document yet.
+    /// </summary>
+    public async Task<byte[]> FlowRunDocumentAsync(string runId, CancellationToken ct = default)
+    {
+        var handle = new BinaryHandle($"{FlowRunsPath}/{runId}/document/file", BinaryFetchImpl, DecryptValueImpl);
+        return await handle.BytesAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// #491 gap 3: this client's OWN identity from <c>GET /api/company-data/whoami</c>. The COMPANY
+    /// party of a <see cref="TriggerFlowRunAsync"/> binding must bind to <c>CompanyUserId</c> (the
+    /// person party's user_id comes from the connection), so without this the company-side binding
+    /// was unconstructible through the SDK.
+    /// </summary>
+    public async Task<Identity> IdentityAsync(CancellationToken ct = default)
+    {
+        var body = await _http.GetAsync($"{Base}/whoami", ct: ct).ConfigureAwait(false);
+        return new Identity(body.Get("company_user_id").AsString(), body.Get("service_id").AsString());
     }
 
     /// <summary>
