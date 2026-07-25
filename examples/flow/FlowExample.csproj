@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    Flow example (run a contract flow) for the allus company-data C# SDK.
+
+    Its OWN project — a standalone console app that hosts a thin localhost backend
+    implementing the demo-backend contract v2 (flow family — see README.md). It
+    references the SDK by PROJECT reference (../../src) so a reader sees which SDK
+    call implements each step of the run. It is NOT part of the published
+    Allus.CompanyData NuGet package: it is a separate project, is not in
+    Allus.CompanyData.slnx, and `dotnet pack` on the SDK never sees it.
+
+    Unlike the identity example there is NO third-party dependency: every handler
+    goes through the SDK's intended top-level flow surface (IdentityAsync /
+    TriggerFlowRunAsync / FlowRunAsync / ProcessFlowRunAsync / FlowRunAnswers /
+    FlowRunDocumentAsync) — never internals, never raw platform HTTP.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Allus.FlowExample</RootNamespace>
+    <AssemblyName>allus-flow-example</AssemblyName>
+    <!-- Never pack/publish this example as a NuGet package. -->
+    <IsPackable>false</IsPackable>
+    <!-- Built against the net8.0 LTS surface; roll forward so it runs on any installed >= 8 runtime. -->
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The SDK under test — the intended top-level flow surface each handler calls. -->
+    <ProjectReference Include="../../src/Allus.CompanyData/Allus.CompanyData.csproj" />
+  </ItemGroup>
+
+</Project>
