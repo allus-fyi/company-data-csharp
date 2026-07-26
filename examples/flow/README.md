@@ -18,8 +18,11 @@ Everything the handler does goes through the SDK's **intended top-level flow sur
 
 ## Run it — one command
 
+Clone this SDK's public repo, enter the example, and run the one command:
+
 ```bash
-cd examples/flow
+git clone https://github.com/allus-fyi/company-data-csharp
+cd company-data-csharp/examples/flow
 dotnet run
 ```
 
@@ -98,7 +101,7 @@ What you then observe:
 
 > **Phone required.** The person's turn — and the contract fixture's signature — are
 > completed on a **physical phone** with the allme app, signed in as the connected
-> demo person (project practice: physical devices).
+> demo person (a real phone, not a simulator).
 
 ---
 
@@ -126,19 +129,12 @@ reports the person's turn and waits.
 The scenario's advanced input (**API url**) defaults to the deployed platform
 (`https://api.allme.fyi`) — **no environment setup**. You register the data client,
 create the service, and import + publish the flow in the **allus portal at
-`portal.allus.fyi`**.
+https://portal.allus.fyi**. A physical phone with the allme app reaches the deployed
+platform naturally.
 
-> **Portal prerequisite / interim (2026-07-24).** `portal.allus.fyi` is **not deployed
-> yet**. Until it lands, the documented interim is to run the **local portal UI against
-> the cluster API**: set `VITE_API_URL=https://api.allme.fyi` in `allus/.env` and start
-> the portal locally (it proxies `/api` to that URL), so every portal step still lands
-> on the same deployed platform the run executes against. A physical phone with the
-> allme app reaches the deployed platform naturally.
-
-Running against a **local stack** is a documented secondary option (see
-`docs/reference/software.html`). In the browser, switch the advanced **API url** to
+Running against a **local stack** is an optional secondary target. In the browser, switch the advanced **API url** to
 `http://localhost:8070`; no file in this example changes. The phone must be able to
-reach the local API (project practice: `adb reverse tcp:8070 tcp:8070` on Android, or
+reach the local API (e.g. `adb reverse tcp:8070 tcp:8070` on Android, or
 the machine's LAN address).
 
 ---

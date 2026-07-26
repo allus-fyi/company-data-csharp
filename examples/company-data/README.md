@@ -17,8 +17,11 @@ never internals, never raw platform HTTP.
 
 ## Run it — one command
 
+Clone this SDK's public repo, enter the example, and run the one command:
+
 ```bash
-cd sdks/csharp/examples/company-data
+git clone https://github.com/allus-fyi/company-data-csharp
+cd company-data-csharp/examples/company-data
 dotnet run
 ```
 
@@ -82,30 +85,37 @@ it, configure request fields, connect a test person).
 
 ---
 
-## The webhook scenario — deployed (tunnel) vs local (native)
+## The webhook scenario — setup first, no tunnel
 
-The webhook receiver is dual-mode:
+This scenario is **setup-first**: register a webhook on your service in the portal,
+then paste its **webhook id** and one-time **HMAC secret** into the scenario before
+starting it — **the run refuses to start without them** (`Server.cs` answers
+`409 not_configured`). Set `encrypt_payload` OFF; this example holds no account
+private key.
 
-- **Local stack** — the local API's delivery worker reaches `localhost` directly, so
-  register **`http://localhost:8091/webhook`** as the service webhook. This is the
-  only mode where inbound webhooks work **without a tunnel**.
-- **Deployed platform** — the cluster cannot reach your `localhost`, so open one
-  tunnel and register its public URL:
+Once it is started **you need no tunnel**. The same run **polls the change feed** as
+an always-works fallback (results are labeled `feed` vs `webhook`), so events appear
+whether or not any inbound webhook can reach you.
 
-  ```bash
-  cloudflared tunnel --url http://localhost:8091
-  ```
+The pull feed is a dedup-upsert **state** feed (one latest-state row per identity),
+while a real webhook stream delivers each event, so the fallback can look like it
+"collapsed" events — that is expected.
 
-  Register the printed public URL with **`/webhook`** appended as the service
-  webhook. Set **`encrypt_payload` OFF** (this example holds no account private key;
-  an encrypted body cannot be decrypted here). Copy the **webhook id** and the
-  one-time **HMAC secret** shown at registration into the scenario's inputs.
+### Optional / advanced — real inbound webhook delivery via a tunnel
 
-Either way, the same run **also polls the change feed** as an always-works fallback
-(labeled `feed` vs `webhook`), so events still appear even with no tunnel. The two
-paths differ in shape: the webhook stream delivers each event, while the pull feed is
-a dedup-upsert **state** feed (one latest-state row per identity), so the fallback
-can look like it "collapsed" events — that is expected.
+To exercise the actual `POST /webhook` receiver against the deployed platform, the
+cluster must reach your `localhost`, so open one tunnel and register its public URL:
+
+```bash
+cloudflared tunnel --url http://localhost:8091
+```
+
+Register the printed public URL with **`/webhook`** appended as the service webhook.
+Set **`encrypt_payload` OFF** (this example holds no account private key; an encrypted
+body cannot be decrypted here). Copy the **webhook id** and the one-time **HMAC
+secret** shown at registration into the scenario's inputs. (Against a **local stack**,
+the local delivery worker reaches `localhost` directly, so you can register
+**`http://localhost:8091/webhook`** with no tunnel at all.)
 
 The receiver runs the EXACT `verifyWebhook → parseWebhook` sequence (never the
 combined `HandleWebhook`, which can't drive the 401-vs-200 split): an unknown/stale
@@ -118,8 +128,7 @@ because the platform delivery worker counts EXACTLY 200 as success.
 
 ## Secondary target — a local stack
 
-Running against a **local stack** instead is a documented secondary option (see
-`docs/reference/software.html`). In the browser, switch the advanced **API url** to
+Running against a **local stack** instead is an optional secondary target. In the browser, switch the advanced **API url** to
 `http://localhost:8070`. No file in **this** example changes.
 
 ---

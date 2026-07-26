@@ -17,8 +17,11 @@ library — that a real OIDC client drives them is the point of the demonstratio
 
 ## Run it — one command
 
+Clone this SDK's public repo, enter the example, and run the one command:
+
 ```bash
-cd examples/identity
+git clone https://github.com/allus-fyi/company-data-csharp
+cd company-data-csharp/examples/identity
 dotnet run
 ```
 
@@ -89,16 +92,15 @@ cluster is the test environment):
 | API url | `https://api.allme.fyi` |
 | Authorize base | `https://web.allme.fyi/auth` |
 
-Register the demo's OAuth apps / data clients in the **allus portal**; each
-scenario's setup checklist names the exact pages. Register the redirect URI
+Register the demo's OAuth apps / data clients in the **allus portal** at
+**https://portal.allus.fyi**; each scenario's setup checklist names the exact pages. Register the redirect URI
 **`http://localhost:8091/callback`** on every OAuth app you create (adjust the port
 if you set `PORT`).
 
-Running against a **local stack** is a documented secondary option: in the browser,
+Running against a **local stack** is an optional secondary target: in the browser,
 switch the advanced inputs to the local URLs (API `http://localhost:8070`, authorize
 base `http://localhost:5174/auth`). No file in this example changes. For OIDC against
-a local stack the local API must advertise itself in discovery (`OIDC_ISSUER`) — see
-`docs/reference/software.html`.
+a local stack the local API must advertise itself in discovery (`OIDC_ISSUER`).
 
 ---
 
