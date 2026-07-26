@@ -1,6 +1,0 @@
-# Transients — never committed (build output + runtime state + fetched bundle).
-/bin/
-/obj/
-/.runtime/
-/.frontend/
-.DS_Store

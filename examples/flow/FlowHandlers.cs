@@ -2,20 +2,61 @@ using System.Text.Json;
 using Allus.CompanyData;
 using Microsoft.AspNetCore.Http;
 
-namespace Allus.FlowExample;
+namespace Allus.ExampleTestSuite.Flow;
 
 /// <summary>
-/// The demo-backend contract (v2) for the ONE contract-flow scenario (flow family). One class, one
-/// worker: HTTP dispatch → handler → the SDK's intended top-level flow surface only (IdentityAsync /
-/// TriggerFlowRunAsync / FlowRunAsync / ProcessFlowRunAsync / FlowRunAnswers / FlowRunDocumentAsync).
-/// Handlers NEVER perform raw platform HTTP.
+/// One company step the SDK drove, as it appears in the flow log: the field <see cref="Slug"/>, its
+/// resolved <see cref="Type"/>, the value <see cref="Submitted"/>, and whether it was
+/// <see cref="Accepted"/> (a rejected email carries the validation <see cref="Error"/>).
+/// </summary>
+public sealed class FlowStep
+{
+    public string Slug { get; set; } = "";
+    public string Type { get; set; } = "";
+    public string Submitted { get; set; } = "";
+    public bool Accepted { get; set; }
+    public string? Error { get; set; }
+}
+
+/// <summary>
+/// One demo run's cross-request state, serialized to <c>.runtime/runs/{runId}.json</c> by the shared
+/// <see cref="Runtime"/>. There is NO separate browser-visible platform flow-run id: the platform run
+/// lives entirely inside this file (<see cref="FlowRunId"/>), and the demo runId IS the backend run
+/// (contract, flow family). The GET /api/runs poll is both the drive loop and the resume; a terminal run
+/// (<see cref="Completed"/> or <see cref="Error"/>) is returned unchanged on every subsequent poll.
+/// </summary>
+public sealed class Run : IRun
+{
+    public string RunId { get; set; } = "";
+    public string Scenario { get; set; } = "flow:run"; // the public scenario id (for clear/dispatch)
+    public string? FlowRunId { get; set; }             // the platform flow-run id, stored INSIDE this run
+
+    /// <summary>The INNER flow status: running | waiting_person | completed (contract's result.status).</summary>
+    public string Status { get; set; } = "running";
+
+    public List<FlowStep> Steps { get; set; } = new();
+    public List<string> RejectedNodes { get; set; } = new(); // nodes whose email demo has been rejected once
+    public List<string> Calls { get; set; } = new();
+    public bool Completed { get; set; }
+
+    // Terminal extras (present once the flow completes).
+    public List<Dictionary<string, object?>>? Answers { get; set; }
+    public Dictionary<string, object?>? Document { get; set; }
+
+    public string? Error { get; set; }
+}
+
+/// <summary>
+/// The flow family's ONE scenario handler (contract v3, flow family). HTTP dispatch → handler → the SDK's
+/// intended top-level flow surface only (IdentityAsync / TriggerFlowRunAsync / FlowRunAsync /
+/// ProcessFlowRunAsync / FlowRunAnswers / FlowRunDocumentAsync). Handlers NEVER perform raw platform HTTP.
 ///
 /// Single scenario "flow:run". There is NO cross-card flow-run-id handoff: the platform flow run lives
 /// entirely INSIDE this one demo run's file — the demo runId is the backend run and the platform
 /// flowRunId is stored inside it, never exposed as a separate browser input.
 ///
 /// Settings flow: the browser POSTs the scenario's setup values to POST /api/scenarios/{id}/config,
-/// which writes them to a canonical SDK config FILE (.runtime/config/{store}.json; the service PEM →
+/// which writes them to a canonical SDK config FILE (.runtime/config/flow_run.json; the service PEM →
 /// .runtime/config/keys/ by path). /start builds the service <see cref="Client"/> from that file via
 /// <see cref="Client.FromConfig"/> (Config.FromFile) and runs OFF the config — exactly as a real
 /// integrator wires the SDK. The request body of /start is ignored; a /start with no saved config → 409.
@@ -24,16 +65,10 @@ namespace Allus.FlowExample;
 /// and, if it is the company's turn, drives exactly ONE company step; otherwise it reports
 /// waiting/running and touches nothing (the next poll after the person answers on their phone resumes).
 /// </summary>
-public sealed class Server
+public sealed class FlowHandlers
 {
-    public const int ContractVersion = 2; // flow family lands at the next-available version (identity=1)
-    public const string Sdk = "csharp";
-
-    /// <summary>The single public scenario id (the flow family).</summary>
-    private const string Scenario = "flow:run";
-
-    /// <summary>Internal store key for the config/meta/run files (the public id is not filesystem-shaped).</summary>
-    private const int StoreId = 1;
+    /// <summary>The single public scenario id (the flow family). Also the config/run store key.</summary>
+    private const string ScenarioId = "flow:run";
 
     private const string DefaultApiUrl = "https://api.allme.fyi";
 
@@ -45,25 +80,14 @@ public sealed class Server
     private const string InvalidEmail = "not-an-email";
 
     private readonly Runtime _rt;
-    private readonly string _sdkVersion;
 
-    public Server(Runtime rt, string sdkVersion)
-    {
-        _rt = rt;
-        _sdkVersion = sdkVersion;
-    }
+    public FlowHandlers(Runtime rt) => _rt = rt;
 
-    private static bool IsKnownScenario(string id) => id == Scenario;
+    private static bool IsKnownScenario(string id) => id == ScenarioId;
 
-    // ── GET /api/meta ────────────────────────────────────────────────────────────
-
-    public Task Meta(HttpContext ctx) => WriteJson(ctx, new
-    {
-        sdk = Sdk,
-        sdkVersion = _sdkVersion,
-        contractVersion = ContractVersion,
-        scenarios = new[] { new { id = Scenario, kind = "runnable" } },
-    });
+    /// <summary>The flow scenario for GET /api/meta.</summary>
+    public IEnumerable<object> ScenarioList() =>
+        new[] { (object)new { id = ScenarioId, kind = "runnable" } };
 
     // ── POST /api/scenarios/{id}/config ──────────────────────────────────────────
 
@@ -75,31 +99,31 @@ public sealed class Server
     /// </summary>
     public async Task SaveConfig(HttpContext ctx, string id)
     {
-        if (!IsKnownScenario(id)) { await NotFound(ctx); return; }
-        var body = await ReadBody(ctx);
+        if (!IsKnownScenario(id)) { await Web.NotFound(ctx); return; }
+        var body = await Web.ReadBody(ctx);
 
         // Canonical SDK config — the service role (client_credentials + service PEM).
         var cfg = new Dictionary<string, object?>
         {
-            ["api_url"] = (Str(body, "apiUrl") is { Length: > 0 } a ? a : DefaultApiUrl).TrimEnd('/'),
-            ["client_id"] = Str(body, "clientId") ?? "",
-            ["client_secret"] = Str(body, "clientSecret") ?? "",
-            ["key_passphrase"] = Str(body, "keyPassphrase") ?? "",
+            ["api_url"] = (Web.Str(body, "apiUrl") is { Length: > 0 } a ? a : DefaultApiUrl).TrimEnd('/'),
+            ["client_id"] = Web.Str(body, "clientId") ?? "",
+            ["client_secret"] = Web.Str(body, "clientSecret") ?? "",
+            ["key_passphrase"] = Web.Str(body, "keyPassphrase") ?? "",
         };
-        if (Str(body, "servicePrivateKeyPem") is { Length: > 0 } pem)
+        if (Web.Str(body, "servicePrivateKeyPem") is { Length: > 0 } pem)
             cfg["service_private_key"] = _rt.MaterializeConfigKey(pem);
 
-        var configPath = _rt.WriteConfig(StoreId, cfg);
+        var configPath = _rt.WriteConfig(ScenarioId, cfg);
 
         // Demo-only run parameters (NOT SDK Config fields) → meta sidecar.
-        _rt.WriteConfigMeta(StoreId, new Dictionary<string, object?>
+        _rt.WriteConfigMeta(ScenarioId, new Dictionary<string, object?>
         {
-            ["flow_id"] = Str(body, "flowId") ?? "",
-            ["connection_id"] = Str(body, "connectionId") ?? "",
-            ["fixture"] = Str(body, "fixture") ?? "",
+            ["flow_id"] = Web.Str(body, "flowId") ?? "",
+            ["connection_id"] = Web.Str(body, "connectionId") ?? "",
+            ["fixture"] = Web.Str(body, "fixture") ?? "",
         });
 
-        await WriteJson(ctx, new { ok = true, configPath });
+        await Web.WriteJson(ctx, new { ok = true, configPath });
     }
 
     // ── POST /api/scenarios/{id}/start ────────────────────────────────────────────
@@ -112,19 +136,19 @@ public sealed class Server
     /// </summary>
     public async Task Start(HttpContext ctx, string id)
     {
-        if (!IsKnownScenario(id)) { await NotFound(ctx); return; }
-        if (!_rt.HasConfig(StoreId))
+        if (!IsKnownScenario(id)) { await Web.NotFound(ctx); return; }
+        if (!_rt.HasConfig(ScenarioId))
         {
             // The run is built from the persisted config file, not the request body.
-            await WriteJson(ctx, new { error = "not_configured" }, 409);
+            await Web.WriteJson(ctx, new { error = "not_configured" }, 409);
             return;
         }
-        var meta = _rt.ReadConfigMeta(StoreId);
-        var flowId = MetaStr(meta, "flow_id") ?? "";
-        var connectionId = MetaStr(meta, "connection_id") ?? "";
+        var meta = _rt.ReadConfigMeta(ScenarioId);
+        var flowId = Web.Str(meta, "flow_id") ?? "";
+        var connectionId = Web.Str(meta, "connection_id") ?? "";
         if (flowId.Length == 0 || connectionId.Length == 0)
         {
-            await WriteJson(ctx, new { error = "not_configured", message = "flow id and connection id are required" }, 409);
+            await Web.WriteJson(ctx, new { error = "not_configured", message = "flow id and connection id are required" }, 409);
             return;
         }
 
@@ -140,7 +164,7 @@ public sealed class Server
             var companyUserId = identity.CompanyUserId ?? "";
             if (companyUserId.Length == 0)
             {
-                await WriteJson(ctx, new { error = "identity_error", message = "IdentityAsync returned no company_user_id" }, 502);
+                await Web.WriteJson(ctx, new { error = "identity_error", message = "IdentityAsync returned no company_user_id" }, 502);
                 return;
             }
 
@@ -150,7 +174,7 @@ public sealed class Server
             var personId = connection.PersonId;
             if (string.IsNullOrEmpty(personId))
             {
-                await WriteJson(ctx, new
+                await Web.WriteJson(ctx, new
                 {
                     error = "connection_error",
                     message = $"connection {connectionId} has no personId (not found or not connected)",
@@ -169,25 +193,25 @@ public sealed class Server
             flowRunId = flowRun.Id ?? "";
             if (flowRunId.Length == 0)
             {
-                await WriteJson(ctx, new { error = "trigger_error", message = "TriggerFlowRunAsync returned no run id" }, 502);
+                await Web.WriteJson(ctx, new { error = "trigger_error", message = "TriggerFlowRunAsync returned no run id" }, 502);
                 return;
             }
         }
         catch (Exception e) when (e is ApiException or ConfigException)
         {
-            await WriteJson(ctx, new { error = "start_failed", message = e.Message }, 502);
+            await Web.WriteJson(ctx, new { error = "start_failed", message = e.Message }, 502);
             return;
         }
 
         var runId = _rt.NewRunId();
         _rt.WriteRun(runId, new Run
         {
-            Scenario = StoreId,
+            Scenario = ScenarioId,
             FlowRunId = flowRunId,
             Calls = calls,
         });
 
-        await WriteJson(ctx, new { runId, action = new { type = "none" } });
+        await Web.WriteJson(ctx, new { runId, action = new { type = "none" } });
     }
 
     // ── GET /api/runs/{runId} ──────────────────────────────────────────────────────
@@ -200,8 +224,8 @@ public sealed class Server
     /// </summary>
     public async Task RunStatus(HttpContext ctx, string runId)
     {
-        var run = _rt.ReadRun(runId);
-        if (run is null) { await WriteJson(ctx, new { error = "not_found" }, 404); return; }
+        var run = _rt.ReadRun<Run>(runId);
+        if (run is null) { await Web.WriteJson(ctx, new { error = "not_found" }, 404); return; }
 
         // Idempotent: once terminal (completed OR errored) the outcome is returned unchanged on every
         // subsequent poll — a failed run must stay failed, not re-drive the platform.
@@ -212,7 +236,7 @@ public sealed class Server
             _rt.WriteRun(runId, run);
         }
 
-        await WriteJson(ctx, Result(run));
+        await Web.WriteJson(ctx, Result(run));
     }
 
     /// <summary>One poll's worth of work. Returns the (possibly mutated) run.</summary>
@@ -399,7 +423,7 @@ public sealed class Server
     // ── SDK client builder — built from the persisted config FILE ──────────────────
 
     /// <summary>Build the service data client OFF the scenario's config file (service role, Config.FromFile).</summary>
-    private Client ServiceClient() => Client.FromConfig(_rt.ConfigPathFor(StoreId));
+    private Client ServiceClient() => Client.FromConfig(_rt.ConfigPathFor(ScenarioId));
 
     /// <summary>
     /// A canned VALID plaintext for a field type (demo values over already-supported answerable types).
@@ -425,42 +449,5 @@ public sealed class Server
     private static void AddCall(Run run, string name)
     {
         if (!run.Calls.Contains(name)) run.Calls.Add(name);
-    }
-
-    // ── HTTP / input plumbing ──────────────────────────────────────────────────────
-
-    private static async Task<JsonElement> ReadBody(HttpContext ctx)
-    {
-        using var reader = new StreamReader(ctx.Request.Body);
-        var raw = await reader.ReadToEndAsync();
-        if (string.IsNullOrWhiteSpace(raw)) return EmptyObject();
-        try
-        {
-            using var doc = JsonDocument.Parse(raw);
-            return doc.RootElement.Clone();
-        }
-        catch (JsonException) { return EmptyObject(); }
-    }
-
-    private static JsonElement EmptyObject()
-    {
-        using var doc = JsonDocument.Parse("{}");
-        return doc.RootElement.Clone();
-    }
-
-    private static string? Str(JsonElement obj, string name) =>
-        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String
-            ? p.GetString()
-            : null;
-
-    private static string? MetaStr(JsonElement meta, string name) => Str(meta, name);
-
-    private static Task NotFound(HttpContext ctx) => WriteJson(ctx, new { error = "not_found" }, 404);
-
-    private static async Task WriteJson(HttpContext ctx, object data, int status = 200)
-    {
-        ctx.Response.StatusCode = status;
-        ctx.Response.ContentType = "application/json";
-        await ctx.Response.WriteAsync(JsonSerializer.Serialize(data));
     }
 }

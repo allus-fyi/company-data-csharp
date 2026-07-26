@@ -4,13 +4,45 @@ using IdentityModel.Client;
 using IdentityModel.OidcClient;
 using Microsoft.AspNetCore.Http;
 
-namespace Allus.IdentityExample;
+namespace Allus.ExampleTestSuite.Identity;
 
 /// <summary>
-/// The demo-backend contract (v1). One class, one worker: HTTP dispatch → handler → the SDK's intended
-/// top-level surface (or the OIDC library for scenarios 5/6). Handlers NEVER perform raw platform HTTP
-/// and NEVER block on the SDK's long defaults — detached / challenge waits are short-cycled (timeout=2)
-/// inside GET /api/runs.
+/// One run's cross-request state (PKCE verifier / OIDC nonce+redirect / outcome). Serialized to
+/// <c>.runtime/runs/{runId}.json</c> by the shared <see cref="Runtime"/>. Free-form <see cref="Result"/>
+/// is whatever the scenario produced.
+/// </summary>
+public sealed class Run : IRun
+{
+    public string RunId { get; set; } = "";
+    public int Scenario { get; set; }
+    public string Status { get; set; } = "pending"; // pending | done | failed
+    public string? State { get; set; }
+    public List<string> Calls { get; set; } = new();
+
+    // Sign-in scenarios (1–4): the PKCE verifier that pairs with the challenge in the authorize URL.
+    public string? Verifier { get; set; }
+
+    // OIDC scenarios (5/6): the redirect the OIDC library needs to complete the exchange (state + PKCE
+    // verifier ride the fields above; the OIDC library owns nonce handling internally).
+    public string? RedirectUri { get; set; }
+
+    // How GET /api/runs advances a still-pending run: detached_signin | detached_enroll | challenge |
+    // enroll_redirect (null → completion arrives via /callback).
+    public string? Wait { get; set; }
+    public bool IsEnroll { get; set; }
+
+    // Scenario 8: the challenge being polled.
+    public string? ChallengeId { get; set; }
+
+    public object? Result { get; set; }
+    public string? Error { get; set; }
+}
+
+/// <summary>
+/// The identity family's scenario handlers (contract v3, identity scenarios 1–8). HTTP dispatch → handler
+/// → the SDK's intended top-level surface (or the OIDC library for scenarios 5/6). Handlers NEVER perform
+/// raw platform HTTP and NEVER block on the SDK's long defaults — detached / challenge waits are
+/// short-cycled (timeout=2) inside GET /api/runs.
 ///
 /// Settings flow: the browser POSTs a scenario's setup values to POST /api/scenarios/{id}/config, which
 /// writes them to a canonical SDK config FILE (.runtime/config/{id}.json). /start and /enroll then build
@@ -18,11 +50,8 @@ namespace Allus.IdentityExample;
 /// Config.FromIdwFile; Client.FromConfig → Config.FromFile) and run OFF the config. The request body of
 /// /start is ignored; a /start with no saved config → 409 not_configured.
 /// </summary>
-public sealed class Server
+public sealed class IdentityHandlers
 {
-    public const int ContractVersion = 1;
-    public const string Sdk = "csharp";
-
     /// <summary>id → "runnable" | "guide". Scenario 7 is the guide card (no /start).</summary>
     private static readonly IReadOnlyDictionary<int, string> Scenarios = new Dictionary<int, string>
     {
@@ -44,85 +73,74 @@ public sealed class Server
     private static readonly HttpClient PollHttp = new() { Timeout = TimeSpan.FromSeconds(2.5) };
 
     private readonly Runtime _rt;
-    private readonly string _sdkVersion;
 
-    public Server(Runtime rt, string sdkVersion)
-    {
-        _rt = rt;
-        _sdkVersion = sdkVersion;
-    }
+    public IdentityHandlers(Runtime rt) => _rt = rt;
 
-    // ── GET /api/meta ──────────────────────────────────────────────────────────
-
-    public Task Meta(HttpContext ctx) => WriteJson(ctx, new
-    {
-        sdk = Sdk,
-        sdkVersion = _sdkVersion,
-        contractVersion = ContractVersion,
-        scenarios = Scenarios.OrderBy(kv => kv.Key).Select(kv => new { id = kv.Key, kind = kv.Value }),
-    });
+    /// <summary>The identity scenarios for GET /api/meta (numeric ids, scenario 7 is a guide).</summary>
+    public IEnumerable<object> ScenarioList() =>
+        Scenarios.OrderBy(kv => kv.Key).Select(kv => (object)new { id = kv.Key, kind = kv.Value });
 
     // ── POST /api/scenarios/{id}/config ──────────────────────────────────────────
 
     public async Task SaveConfig(HttpContext ctx, int id)
     {
-        if (!IsRunnable(id)) { await NotFound(ctx); return; }
-        var body = await ReadBody(ctx);
+        if (!IsRunnable(id)) { await Web.NotFound(ctx); return; }
+        var body = await Web.ReadBody(ctx);
 
         // Canonical SDK config — the idw role for every OAuth scenario.
         var cfg = new Dictionary<string, object?>
         {
-            ["api_url"] = (Str(body, "apiUrl") is { Length: > 0 } a ? a : DefaultApiUrl).TrimEnd('/'),
-            ["oauth_client_id"] = Str(body, "oauthClientId") ?? "",
+            ["api_url"] = (Web.Str(body, "apiUrl") is { Length: > 0 } a ? a : DefaultApiUrl).TrimEnd('/'),
+            ["oauth_client_id"] = Web.Str(body, "oauthClientId") ?? "",
             ["oauth_redirect_uri"] = RedirectUri(ctx),
         };
-        if (Str(body, "oauthClientSecret") is { Length: > 0 } secret)
+        if (Web.Str(body, "oauthClientSecret") is { Length: > 0 } secret)
             cfg["oauth_client_secret"] = secret;
 
         // Scenario 3 (one_time): the OAuth app private key decrypts the claim values (config-only keys).
         if (id == 3)
         {
-            if (Str(body, "oauthPrivateKeyPem") is { Length: > 0 } pem)
+            if (Web.Str(body, "oauthPrivateKeyPem") is { Length: > 0 } pem)
                 cfg["oauth_private_key"] = _rt.MaterializeConfigKey(pem);
-            if (Str(body, "oauthKeyPassphrase") is { Length: > 0 } pass)
+            if (Web.Str(body, "oauthKeyPassphrase") is { Length: > 0 } pass)
                 cfg["oauth_key_passphrase"] = pass;
         }
 
         // Scenarios 4/8 also read live values via the service data Client — add the service-role keys.
         if (ServiceScenarios.Contains(id))
         {
-            cfg["client_id"] = Str(body, "clientId") ?? "";
-            cfg["client_secret"] = Str(body, "clientSecret") ?? "";
-            if (Str(body, "servicePrivateKeyPem") is { Length: > 0 } sPem)
+            cfg["client_id"] = Web.Str(body, "clientId") ?? "";
+            cfg["client_secret"] = Web.Str(body, "clientSecret") ?? "";
+            if (Web.Str(body, "servicePrivateKeyPem") is { Length: > 0 } sPem)
                 cfg["service_private_key"] = _rt.MaterializeConfigKey(sPem);
-            cfg["key_passphrase"] = Str(body, "keyPassphrase") ?? "";
+            cfg["key_passphrase"] = Web.Str(body, "keyPassphrase") ?? "";
         }
 
-        var configPath = _rt.WriteConfig(id, cfg);
+        var configPath = _rt.WriteConfig(id.ToString(), cfg);
 
         // Demo-only run parameters (NOT SDK Config fields) → meta sidecar.
         var meta = new Dictionary<string, object?>();
         if (OAuthUrlScenarios.Contains(id))
-            meta["authorize_base"] = Str(body, "authorizeBase") is { Length: > 0 } ab ? ab : DefaultAuthorizeBase;
+            meta["authorize_base"] = Web.Str(body, "authorizeBase") is { Length: > 0 } ab ? ab : DefaultAuthorizeBase;
         if (id == 3)
             meta["claims"] = Claims(body);
         if (id == 8)
         {
-            meta["share_code"] = Str(body, "shareCode") ?? "";
-            if (Str(body, "context") is { Length: > 0 } context)
+            meta["share_code"] = Web.Str(body, "shareCode") ?? "";
+            if (Web.Str(body, "context") is { Length: > 0 } context)
                 meta["context"] = context;
         }
-        _rt.WriteConfigMeta(id, meta);
+        _rt.WriteConfigMeta(id.ToString(), meta);
 
-        await WriteJson(ctx, new { ok = true, configPath });
+        await Web.WriteJson(ctx, new { ok = true, configPath });
     }
 
     // ── POST /api/scenarios/{id}/start ────────────────────────────────────────────
 
     public async Task Start(HttpContext ctx, int id)
     {
-        if (!IsRunnable(id)) { await NotFound(ctx); return; }
-        if (!_rt.HasConfig(id)) { await WriteJson(ctx, new { error = "not_configured" }, 409); return; }
+        if (!IsRunnable(id)) { await Web.NotFound(ctx); return; }
+        if (!_rt.HasConfig(id.ToString())) { await Web.WriteJson(ctx, new { error = "not_configured" }, 409); return; }
 
         var runId = _rt.NewRunId();
         var run = new Run { Scenario = id, Status = "pending", State = runId };
@@ -141,7 +159,7 @@ public sealed class Server
                 var url = oauth.AuthorizeUrl(mode, claims, runId, "redirect", challenge);
                 run.Calls.Add("OAuthClient.AuthorizeUrl");
                 _rt.WriteRun(runId, run);
-                await WriteJson(ctx, new { runId, action = new { type = "redirect", url } });
+                await Web.WriteJson(ctx, new { runId, action = new { type = "redirect", url } });
                 return;
             }
 
@@ -154,7 +172,7 @@ public sealed class Server
                 var url = oauth.AuthorizeUrl("signin", null, runId, "detached", challenge);
                 run.Calls.Add("OAuthClient.AuthorizeUrl");
                 _rt.WriteRun(runId, run);
-                await WriteJson(ctx, new { runId, action = new { type = "detached", url } });
+                await Web.WriteJson(ctx, new { runId, action = new { type = "detached", url } });
                 return;
             }
 
@@ -171,15 +189,15 @@ public sealed class Server
                 run.RedirectUri = authState.RedirectUri;
                 run.Calls.Add("(oidc) OidcClient.PrepareLoginAsync");
                 _rt.WriteRun(oidcRunId, run);
-                await WriteJson(ctx, new { runId = oidcRunId, action = new { type = "redirect", url = authState.StartUrl } });
+                await Web.WriteJson(ctx, new { runId = oidcRunId, action = new { type = "redirect", url = authState.StartUrl } });
                 return;
             }
 
             case 8: // Standalone service-2FA — the challenge step
             {
-                var meta = _rt.ReadConfigMeta(id);
-                var shareCode = MetaStr(meta, "share_code") ?? "";
-                var context = MetaStr(meta, "context") is { Length: > 0 } c ? c : null;
+                var meta = _rt.ReadConfigMeta(id.ToString());
+                var shareCode = Web.Str(meta, "share_code") ?? "";
+                var context = Web.Str(meta, "context") is { Length: > 0 } c ? c : null;
                 var idempotencyKey = ("demo-" + runId)[..Math.Min(64, ("demo-" + runId).Length)];
                 run.Wait = "challenge";
                 var client = ServiceClientFor(id);
@@ -188,7 +206,7 @@ public sealed class Server
                 run.Calls.Add("Client.TwoFactor");
                 run.Calls.Add("TwoFactorClient.ChallengeAsync");
                 _rt.WriteRun(runId, run);
-                await WriteJson(ctx, new { runId, action = new { type = "challenge", matchingDigits = challenge.MatchingDigits } });
+                await Web.WriteJson(ctx, new { runId, action = new { type = "challenge", matchingDigits = challenge.MatchingDigits } });
                 return;
             }
         }
@@ -198,11 +216,11 @@ public sealed class Server
 
     public async Task Enroll(HttpContext ctx, int id)
     {
-        if (id != 8) { await NotFound(ctx); return; }
-        if (!_rt.HasConfig(id)) { await WriteJson(ctx, new { error = "not_configured" }, 409); return; }
+        if (id != 8) { await Web.NotFound(ctx); return; }
+        if (!_rt.HasConfig(id.ToString())) { await Web.WriteJson(ctx, new { error = "not_configured" }, 409); return; }
 
-        var body = await ReadBody(ctx);
-        var responseMode = Str(body, "responseMode") == "detached" ? "detached" : "redirect"; // default redirect
+        var body = await Web.ReadBody(ctx);
+        var responseMode = Web.Str(body, "responseMode") == "detached" ? "detached" : "redirect"; // default redirect
         var runId = _rt.NewRunId();
 
         var oauth = OAuthClientFor(id);
@@ -222,7 +240,7 @@ public sealed class Server
         object action = responseMode == "detached"
             ? new { type = "detached", url }
             : new { type = "redirect", url };
-        await WriteJson(ctx, new { runId, action });
+        await Web.WriteJson(ctx, new { runId, action });
     }
 
     // ── GET /callback ──────────────────────────────────────────────────────────────
@@ -230,7 +248,7 @@ public sealed class Server
     public async Task Callback(HttpContext ctx)
     {
         var state = ctx.Request.Query["state"].ToString();
-        var run = _rt.ReadRun(state);
+        var run = _rt.ReadRun<Run>(state);
         if (run is null) { ctx.Response.Redirect("/?error=unknown_run"); return; }
         var id = run.Scenario;
 
@@ -267,8 +285,8 @@ public sealed class Server
 
     public async Task RunStatus(HttpContext ctx, string runId)
     {
-        var run = _rt.ReadRun(runId);
-        if (run is null) { await WriteJson(ctx, new { error = "not_found" }, 404); return; }
+        var run = _rt.ReadRun<Run>(runId);
+        if (run is null) { await Web.WriteJson(ctx, new { error = "not_found" }, 404); return; }
 
         // Idempotent: a terminal outcome is returned on every poll until TTL/Clear.
         if (run.Status == "pending")
@@ -280,7 +298,7 @@ public sealed class Server
         var outObj = new Dictionary<string, object?> { ["status"] = run.Status, ["calls"] = run.Calls };
         if (run.Result is not null) outObj["result"] = run.Result;
         if (run.Error is not null) outObj["error"] = run.Error;
-        await WriteJson(ctx, outObj);
+        await Web.WriteJson(ctx, outObj);
     }
 
     /// <summary>
@@ -421,9 +439,9 @@ public sealed class Server
     /// </summary>
     private OAuthClient OAuthClientFor(int id, bool shortTimeout = false)
     {
-        var path = _rt.ConfigPathFor(id);
+        var path = _rt.ConfigPathFor(id.ToString());
         IHttpTransport? transport = shortTimeout ? new HttpTransport(PollHttp) : null;
-        var baseUrl = MetaStr(_rt.ReadConfigMeta(id), "authorize_base") ?? "";
+        var baseUrl = Web.Str(_rt.ReadConfigMeta(id.ToString()), "authorize_base") ?? "";
         if (baseUrl.Length == 0 || baseUrl == OAuthClient.DefaultAuthorizeUrl)
             return OAuthClient.FromConfig(path, transport);
         return new OAuthClient(Config.FromIdwFile(path), transport, authorizeUrl: baseUrl);
@@ -432,7 +450,7 @@ public sealed class Server
     /// <summary>Build the service data client OFF the scenario's config file (service role).</summary>
     private Client ServiceClientFor(int id, bool shortTimeout = false)
     {
-        var path = _rt.ConfigPathFor(id);
+        var path = _rt.ConfigPathFor(id.ToString());
         if (!shortTimeout) return Client.FromConfig(path);
         var cfg = Config.FromFile(path);
         return new Client(cfg, new ApiHttp(cfg, new HttpTransport(PollHttp)));
@@ -441,14 +459,14 @@ public sealed class Server
     /// <summary>Build the OIDC client (the #314 compliance surface) from the config file.</summary>
     private OidcClient OidcClientFor(int id)
     {
-        using var doc = JsonDocument.Parse(File.ReadAllText(_rt.ConfigPathFor(id)));
+        using var doc = JsonDocument.Parse(File.ReadAllText(_rt.ConfigPathFor(id.ToString())));
         var cfg = doc.RootElement;
         var options = new OidcClientOptions
         {
-            Authority = CfgStr(cfg, "api_url"),
-            ClientId = CfgStr(cfg, "oauth_client_id"),
-            ClientSecret = CfgStr(cfg, "oauth_client_secret"),
-            RedirectUri = CfgStr(cfg, "oauth_redirect_uri"),
+            Authority = Web.Str(cfg, "api_url"),
+            ClientId = Web.Str(cfg, "oauth_client_id"),
+            ClientSecret = Web.Str(cfg, "oauth_client_secret"),
+            RedirectUri = Web.Str(cfg, "oauth_redirect_uri"),
             Scope = "openid profile email",
             // The token endpoint's only method is client_secret_post.
             TokenClientCredentialStyle = ClientCredentialStyle.PostBody,
@@ -473,8 +491,8 @@ public sealed class Server
     {
         try
         {
-            using var doc = JsonDocument.Parse(File.ReadAllText(_rt.ConfigPathFor(id)));
-            return CfgStr(doc.RootElement, "oauth_redirect_uri") ?? RedirectUri(ctx);
+            using var doc = JsonDocument.Parse(File.ReadAllText(_rt.ConfigPathFor(id.ToString())));
+            return Web.Str(doc.RootElement, "oauth_redirect_uri") ?? RedirectUri(ctx);
         }
         catch (Exception) { return RedirectUri(ctx); }
     }
@@ -489,7 +507,7 @@ public sealed class Server
 
     private List<Claim> ClaimObjects(int id)
     {
-        var meta = _rt.ReadConfigMeta(id);
+        var meta = _rt.ReadConfigMeta(id.ToString());
         var types = meta.ValueKind == JsonValueKind.Object && meta.TryGetProperty("claims", out var arr) &&
                     arr.ValueKind == JsonValueKind.Array
             ? arr.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!)
@@ -498,42 +516,4 @@ public sealed class Server
     }
 
     private static bool IsRunnable(int id) => Scenarios.TryGetValue(id, out var k) && k == "runnable";
-
-    private static async Task<JsonElement> ReadBody(HttpContext ctx)
-    {
-        using var reader = new StreamReader(ctx.Request.Body);
-        var raw = await reader.ReadToEndAsync();
-        if (string.IsNullOrWhiteSpace(raw)) return EmptyObject();
-        try
-        {
-            using var doc = JsonDocument.Parse(raw);
-            return doc.RootElement.Clone();
-        }
-        catch (JsonException) { return EmptyObject(); }
-    }
-
-    private static JsonElement EmptyObject()
-    {
-        using var doc = JsonDocument.Parse("{}");
-        return doc.RootElement.Clone();
-    }
-
-    private static string? Str(JsonElement obj, string name) =>
-        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String
-            ? p.GetString()
-            : null;
-
-    private static string? MetaStr(JsonElement meta, string name) => Str(meta, name);
-    private static string? CfgStr(JsonElement cfg, string name) => Str(cfg, name);
-
-    // ── HTTP plumbing ──────────────────────────────────────────────────────────────
-
-    private static Task NotFound(HttpContext ctx) => WriteJson(ctx, new { error = "not_found" }, 404);
-
-    private static async Task WriteJson(HttpContext ctx, object data, int status = 200)
-    {
-        ctx.Response.StatusCode = status;
-        ctx.Response.ContentType = "application/json";
-        await ctx.Response.WriteAsync(JsonSerializer.Serialize(data));
-    }
 }

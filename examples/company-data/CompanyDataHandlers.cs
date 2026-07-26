@@ -3,12 +3,34 @@ using System.Text.Json;
 using Allus.CompanyData;
 using Microsoft.AspNetCore.Http;
 
-namespace Allus.CompanyDataExample;
+namespace Allus.ExampleTestSuite.CompanyData;
 
 /// <summary>
-/// The company-data demo backend (contract v3, company-data family). One class, one worker: HTTP
-/// dispatch → handler → the SDK's intended top-level surface ONLY (no raw platform HTTP, no SDK
-/// internals).
+/// One run's cross-request state. Serialized to <c>.runtime/runs/{runId}.json</c> by the shared
+/// <see cref="Runtime"/>. The four data scenarios store a terminal <see cref="Result"/>; the accumulating
+/// webhook run keeps growing <see cref="Events"/> / <see cref="Unparseable"/> under <c>status:"pending"</c>.
+/// </summary>
+public sealed class Run : IRun
+{
+    public string RunId { get; set; } = "";
+    public string Scenario { get; set; } = "";
+    public string Status { get; set; } = "pending"; // pending | done | failed
+    public List<string> Calls { get; set; } = new();
+
+    // Data scenarios (read / definitions / changes / documents): the pinned terminal shape.
+    public object? Result { get; set; }
+    public string? Error { get; set; }
+
+    // Webhook scenario — the accumulating run.
+    public string? WebhookId { get; set; }
+    public List<object?>? Events { get; set; }   // {source,…,id,raw} projected Change events
+    public List<string>? SeenFeedIds { get; set; } // feed-only dedup set for the drainBatch() fallback
+    public int Unparseable { get; set; }
+}
+
+/// <summary>
+/// The company-data family's scenario handlers (contract v3, company-data family). HTTP dispatch → handler
+/// → the SDK's intended top-level surface ONLY (no raw platform HTTP, no SDK internals).
 ///
 /// Five scenarios, all namespaced companydata:*, all using the SERVICE-role data <see cref="Client"/>:
 ///   read        — Client.ConnectionsAsync()   → connection-grouped decrypted values
@@ -22,11 +44,8 @@ namespace Allus.CompanyDataExample;
 /// writes them to a canonical SDK config FILE (.runtime/config/{sid}.json). /start builds the Client from
 /// that file (Client.FromConfig → Config.FromFile) and runs OFF it. A /start with no saved config → 409.
 /// </summary>
-public sealed class Server
+public sealed class CompanyDataHandlers
 {
-    public const int ContractVersion = 3;
-    public const string Sdk = "csharp";
-
     private const string Read = "companydata:read";
     private const string Definitions = "companydata:definitions";
     private const string Changes = "companydata:changes";
@@ -45,23 +64,12 @@ public sealed class Server
     private const string DefaultApiUrl = "https://api.allme.fyi";
 
     private readonly Runtime _rt;
-    private readonly string _sdkVersion;
 
-    public Server(Runtime rt, string sdkVersion)
-    {
-        _rt = rt;
-        _sdkVersion = sdkVersion;
-    }
+    public CompanyDataHandlers(Runtime rt) => _rt = rt;
 
-    // ── GET /api/meta ──────────────────────────────────────────────────────────
-
-    public Task Meta(HttpContext ctx) => WriteJson(ctx, new
-    {
-        sdk = Sdk,
-        sdkVersion = _sdkVersion,
-        contractVersion = ContractVersion,
-        scenarios = ScenarioIds.Select(id => new { id, kind = "runnable" }),
-    });
+    /// <summary>The company-data scenarios for GET /api/meta.</summary>
+    public IEnumerable<object> ScenarioList() =>
+        ScenarioIds.Select(id => (object)new { id, kind = "runnable" });
 
     // ── POST /api/scenarios/{id}/config ──────────────────────────────────────────
 
@@ -74,17 +82,17 @@ public sealed class Server
     /// </summary>
     public async Task SaveConfig(HttpContext ctx, string id)
     {
-        if (!IsScenario(id)) { await NotFound(ctx); return; }
-        var body = await ReadBody(ctx);
+        if (!IsScenario(id)) { await Web.NotFound(ctx); return; }
+        var body = await Web.ReadBody(ctx);
 
         var cfg = new Dictionary<string, object?>
         {
-            ["api_url"] = (Str(body, "apiUrl") is { Length: > 0 } a ? a : DefaultApiUrl).TrimEnd('/'),
-            ["client_id"] = Str(body, "clientId") ?? "",
-            ["client_secret"] = Str(body, "clientSecret") ?? "",
-            ["key_passphrase"] = Str(body, "keyPassphrase") ?? "",
+            ["api_url"] = (Web.Str(body, "apiUrl") is { Length: > 0 } a ? a : DefaultApiUrl).TrimEnd('/'),
+            ["client_id"] = Web.Str(body, "clientId") ?? "",
+            ["client_secret"] = Web.Str(body, "clientSecret") ?? "",
+            ["key_passphrase"] = Web.Str(body, "keyPassphrase") ?? "",
         };
-        if (Str(body, "servicePrivateKeyPem") is { Length: > 0 } pem)
+        if (Web.Str(body, "servicePrivateKeyPem") is { Length: > 0 } pem)
             cfg["service_private_key"] = _rt.MaterializeConfigKey(pem);
 
         // Pump scenarios persist their buffer/dead-letters under .runtime/cache (Config.cache_dir).
@@ -96,28 +104,28 @@ public sealed class Server
         {
             // The verifier selects the secret by the delivery's X-Allus-Webhook-Id header, so the config's
             // webhooks map must be keyed by the real webhook id.
-            var webhookId = Str(body, "webhookId") ?? "";
-            var secret = Str(body, "webhookSecret") ?? "";
+            var webhookId = Web.Str(body, "webhookId") ?? "";
+            var secret = Web.Str(body, "webhookSecret") ?? "";
             if (webhookId.Length > 0 && secret.Length > 0)
                 cfg["webhooks"] = new Dictionary<string, string> { [webhookId] = secret };
             if (webhookId.Length > 0)
                 meta["webhook_id"] = webhookId; // the routing key /start writes into the route record
         }
         if (id == Documents)
-            meta["share_code"] = Str(body, "shareCode") ?? ""; // the per-person/contract target
+            meta["share_code"] = Web.Str(body, "shareCode") ?? ""; // the per-person/contract target
 
         var configPath = _rt.WriteConfig(id, cfg);
         _rt.WriteConfigMeta(id, meta);
 
-        await WriteJson(ctx, new { ok = true, configPath });
+        await Web.WriteJson(ctx, new { ok = true, configPath });
     }
 
     // ── POST /api/scenarios/{id}/start ────────────────────────────────────────────
 
     public async Task Start(HttpContext ctx, string id)
     {
-        if (!IsScenario(id)) { await NotFound(ctx); return; }
-        if (!_rt.HasConfig(id)) { await WriteJson(ctx, new { error = "not_configured" }, 409); return; }
+        if (!IsScenario(id)) { await Web.NotFound(ctx); return; }
+        if (!_rt.HasConfig(id)) { await Web.WriteJson(ctx, new { error = "not_configured" }, 409); return; }
 
         switch (id)
         {
@@ -151,7 +159,7 @@ public sealed class Server
             run.Error = e.Message;
         }
         _rt.WriteRun(runId, run);
-        await WriteJson(ctx, new { runId, action = new { type = "data" } });
+        await Web.WriteJson(ctx, new { runId, action = new { type = "data" } });
     }
 
     /// <summary>
@@ -236,7 +244,7 @@ public sealed class Server
     /// </summary>
     private async Task<object> DoDocuments(Client client, List<string> calls)
     {
-        var shareCode = MetaStr(_rt.ReadConfigMeta(Documents), "share_code") ?? "";
+        var shareCode = Web.Str(_rt.ReadConfigMeta(Documents), "share_code") ?? "";
 
         // (label, perPerson, factory) — the factory builds the exact CreateDocumentAsync call. A perPerson
         // spec has its share_code applied inside DoDocuments so the "target a connected person" rule is
@@ -306,8 +314,8 @@ public sealed class Server
     /// </summary>
     private async Task StartWebhook(HttpContext ctx)
     {
-        var webhookId = MetaStr(_rt.ReadConfigMeta(Webhook), "webhook_id") ?? "";
-        if (webhookId.Length == 0) { await WriteJson(ctx, new { error = "not_configured" }, 409); return; }
+        var webhookId = Web.Str(_rt.ReadConfigMeta(Webhook), "webhook_id") ?? "";
+        if (webhookId.Length == 0) { await Web.WriteJson(ctx, new { error = "not_configured" }, 409); return; }
 
         var runId = _rt.NewRunId();
         var run = new Run
@@ -325,7 +333,7 @@ public sealed class Server
         };
         _rt.WriteRun(runId, run);
         _rt.WriteRoute(webhookId, runId);
-        await WriteJson(ctx, new { runId, action = new { type = "none" } });
+        await Web.WriteJson(ctx, new { runId, action = new { type = "none" } });
     }
 
     /// <summary>
@@ -340,20 +348,20 @@ public sealed class Server
     /// </summary>
     public async Task WebhookReceive(HttpContext ctx)
     {
-        var rawBody = await ReadRawBody(ctx);
-        var headers = RequestHeaders(ctx);
-        var webhookId = Header(headers, "X-Allus-Webhook-Id");
+        var rawBody = await Web.ReadRawBody(ctx);
+        var headers = Web.RequestHeaders(ctx);
+        var webhookId = Web.Header(headers, "X-Allus-Webhook-Id");
 
         var route = _rt.ReadRoute();
         if (route is not { } r || webhookId is null || webhookId != r.WebhookId)
         {
-            await WriteText(ctx, "discarded: unknown or stale webhook id", 200);
+            await Web.WriteText(ctx, "discarded: unknown or stale webhook id", 200);
             return;
         }
-        var run = _rt.ReadRun(r.RunId);
+        var run = _rt.ReadRun<Run>(r.RunId);
         if (run is null)
         {
-            await WriteText(ctx, "discarded: no active webhook run", 200);
+            await Web.WriteText(ctx, "discarded: no active webhook run", 200);
             return;
         }
 
@@ -363,7 +371,7 @@ public sealed class Server
         {
             // A genuine signature failure — persist the attempted verify so the calls trace stays truthful.
             _rt.WriteRun(r.RunId, run);
-            await WriteText(ctx, "signature verification failed", 401);
+            await Web.WriteText(ctx, "signature verification failed", 401);
             return;
         }
         try
@@ -386,15 +394,15 @@ public sealed class Server
             });
         }
         _rt.WriteRun(r.RunId, run);
-        await WriteText(ctx, "ok", 200);
+        await Web.WriteText(ctx, "ok", 200);
     }
 
     // ── GET /api/runs/{runId} ────────────────────────────────────────────────────
 
     public async Task RunStatus(HttpContext ctx, string runId)
     {
-        var run = _rt.ReadRun(runId);
-        if (run is null) { await WriteJson(ctx, new { error = "not_found" }, 404); return; }
+        var run = _rt.ReadRun<Run>(runId);
+        if (run is null) { await Web.WriteJson(ctx, new { error = "not_found" }, 404); return; }
 
         if (run.Scenario == Webhook)
         {
@@ -402,7 +410,7 @@ public sealed class Server
             // fetch (NOT ProcessChangesAsync(), which loops the pump to empty and could stall the single
             // worker) so events generated AFTER start still appear in deployed-no-tunnel mode.
             run = await WebhookFeedFallback(runId, run);
-            await WriteJson(ctx, new Dictionary<string, object?>
+            await Web.WriteJson(ctx, new Dictionary<string, object?>
             {
                 ["status"] = run.Status,
                 ["calls"] = run.Calls,
@@ -419,7 +427,7 @@ public sealed class Server
         var outObj = new Dictionary<string, object?> { ["status"] = run.Status, ["calls"] = run.Calls };
         if (run.Result is not null) outObj["result"] = run.Result;
         if (run.Error is not null) outObj["error"] = run.Error;
-        await WriteJson(ctx, outObj);
+        await Web.WriteJson(ctx, outObj);
     }
 
     /// <summary>
@@ -577,70 +585,7 @@ public sealed class Server
         return Encoding.UTF8.GetBytes(sb.ToString());
     }
 
-    // ── input / config plumbing ────────────────────────────────────────────────────
+    // ── input plumbing ────────────────────────────────────────────────────────────
 
     private static bool IsScenario(string id) => ScenarioIds.Contains(id);
-
-    private static async Task<JsonElement> ReadBody(HttpContext ctx)
-    {
-        using var reader = new StreamReader(ctx.Request.Body);
-        var raw = await reader.ReadToEndAsync();
-        if (string.IsNullOrWhiteSpace(raw)) return EmptyObject();
-        try
-        {
-            using var doc = JsonDocument.Parse(raw);
-            return doc.RootElement.Clone();
-        }
-        catch (JsonException) { return EmptyObject(); }
-    }
-
-    private static async Task<string> ReadRawBody(HttpContext ctx)
-    {
-        using var reader = new StreamReader(ctx.Request.Body);
-        return await reader.ReadToEndAsync();
-    }
-
-    /// <summary>Request headers as a name → value map (for the SDK webhook verify/parse, which look them up
-    /// case-insensitively).</summary>
-    private static IReadOnlyDictionary<string, string> RequestHeaders(HttpContext ctx)
-    {
-        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (k, v) in ctx.Request.Headers)
-            map[k] = v.ToString();
-        return map;
-    }
-
-    private static string? Header(IReadOnlyDictionary<string, string> headers, string name) =>
-        headers.TryGetValue(name, out var v) ? v : null;
-
-    private static JsonElement EmptyObject()
-    {
-        using var doc = JsonDocument.Parse("{}");
-        return doc.RootElement.Clone();
-    }
-
-    private static string? Str(JsonElement obj, string name) =>
-        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String
-            ? p.GetString()
-            : null;
-
-    private static string? MetaStr(JsonElement meta, string name) => Str(meta, name);
-
-    // ── HTTP plumbing ──────────────────────────────────────────────────────────────
-
-    private static Task NotFound(HttpContext ctx) => WriteJson(ctx, new { error = "not_found" }, 404);
-
-    private static async Task WriteJson(HttpContext ctx, object data, int status = 200)
-    {
-        ctx.Response.StatusCode = status;
-        ctx.Response.ContentType = "application/json";
-        await ctx.Response.WriteAsync(JsonSerializer.Serialize(data));
-    }
-
-    private static async Task WriteText(HttpContext ctx, string body, int status = 200)
-    {
-        ctx.Response.StatusCode = status;
-        ctx.Response.ContentType = "text/plain; charset=utf-8";
-        await ctx.Response.WriteAsync(body);
-    }
 }

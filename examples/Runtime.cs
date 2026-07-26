@@ -3,44 +3,29 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Allus.CompanyDataExample;
+namespace Allus.ExampleTestSuite;
 
-/// <summary>
-/// One run's cross-request state. Serialized to <c>.runtime/runs/{runId}.json</c>. The four data
-/// scenarios store a terminal <see cref="Result"/>; the accumulating webhook run keeps growing
-/// <see cref="Events"/> / <see cref="Unparseable"/> under <c>status:"pending"</c>.
-/// </summary>
-public sealed class Run
+/// <summary>A run persisted to the shared store. Every family's run carries a RunId.</summary>
+public interface IRun
 {
-    public string RunId { get; set; } = "";
-    public string Scenario { get; set; } = "";
-    public string Status { get; set; } = "pending"; // pending | done | failed
-    public List<string> Calls { get; set; } = new();
-
-    // Data scenarios (read / definitions / changes / documents): the pinned terminal shape.
-    public object? Result { get; set; }
-    public string? Error { get; set; }
-
-    // Webhook scenario — the accumulating run.
-    public string? WebhookId { get; set; }
-    public List<object?>? Events { get; set; }   // {source,…,id,raw} projected Change events
-    public List<string>? SeenFeedIds { get; set; } // feed-only dedup set for the drainBatch() fallback
-    public int Unparseable { get; set; }
+    string RunId { get; set; }
 }
 
 /// <summary>
-/// Cross-request state for the company-data demo backend (contract §"Backend state" / company-data
-/// family). Single-worker server → requests serialize; there is NO concurrency to guard, so NO locks,
-/// NO tombstones, NO burn-on-read. Everything lives under <see cref="RuntimeDir"/> (git-ignored, wiped
-/// at startup):
+/// The shared cross-request state store for the whole example test suite (contract §"Backend state").
+/// ONE server, ONE <c>.runtime/</c> tree — every family's configs + runs live here, keyed per scenario
+/// id. The single-worker server serializes requests, so there is NO concurrency to guard: NO locks, NO
+/// tombstones, NO burn-on-read. The tree is git-ignored and wiped at startup:
 /// <list type="bullet">
-///   <item>config/{sid}.json — the canonical SDK config file a scenario runs OFF (NOT TTL-swept)</item>
-///   <item>config/{sid}.meta.json — demo-only run parameters (webhook id, documents share_code)</item>
-///   <item>config/keys/&lt;sha1&gt;.pem — the service private-key file(s) a config references by path (0600)</item>
-///   <item>runs/{runId}.json — one run's accumulated result + calls (30-min TTL, lazy sweep)</item>
-///   <item>webhook-route.json — the SINGLE active webhook run {webhookId, runId}</item>
+///   <item>config/{sid}.json — a scenario's canonical SDK config file it runs OFF (NOT TTL-swept)</item>
+///   <item>config/{sid}.meta.json — demo-only run parameters (authorize_base, claims, webhook id, …)</item>
+///   <item>config/keys/&lt;sha1&gt;.pem — private-key file(s) a config references by path (0600)</item>
+///   <item>runs/{runId}.json — one run's cross-request state (30-min TTL, lazy sweep)</item>
+///   <item>webhook-route.json — the SINGLE active company-data webhook run {webhookId, runId}</item>
 ///   <item>cache/ — the SDK pump's buffer + dead-letter dir (Config.cache_dir), wiped by Clear</item>
 /// </list>
+/// Runs are stored + read per family via the generic <see cref="WriteRun{T}"/> / <see cref="ReadRun{T}"/>;
+/// each run file records its scenario id so sweep/clear/dispatch stay family-agnostic here.
 /// </summary>
 public sealed class Runtime
 {
@@ -69,8 +54,9 @@ public sealed class Runtime
         RunsDir = Path.Combine(RuntimeDir, "runs");
         ConfigDir = Path.Combine(RuntimeDir, "config");
         ConfigKeysDir = Path.Combine(ConfigDir, "keys");
-        // The SDK pump persists its buffer + dead-letters here (Config.cache_dir → this path), so Clear /
-        // the startup wipe removes it and the "writes only under .runtime/" property holds.
+        // The SDK pump (company-data changes/webhook) persists its buffer + dead-letters here
+        // (Config.cache_dir → this path), so Clear / the startup wipe removes it and the
+        // "writes only under .runtime/" property holds.
         CacheDir = Path.Combine(RuntimeDir, "cache");
         RoutePath = Path.Combine(RuntimeDir, "webhook-route.json");
     }
@@ -92,7 +78,7 @@ public sealed class Runtime
     // ── lazy TTL sweep (contract: on every request) ────────────────────────────
 
     /// <summary>
-    /// Remove expired run files and orphaned *.tmp files. When the active webhook run expires, its
+    /// Remove expired run files and orphaned *.tmp files. When the active webhook run's file is gone, the
     /// routing record is dropped too (a stale record never routes to a burned run).
     /// </summary>
     public void Sweep()
@@ -112,7 +98,6 @@ public sealed class Runtime
                     TryDelete(path);
             }
         }
-        // Drop the routing record if its run is gone (expired/swept above).
         var route = ReadRoute();
         if (route is { } r && !File.Exists(Path.Combine(RunsDir, $"{r.RunId}.json")))
             TryDelete(RoutePath);
@@ -120,7 +105,8 @@ public sealed class Runtime
 
     // ── config files ───────────────────────────────────────────────────────────
 
-    /// <summary>Filesystem-safe token for a scenario id (e.g. "companydata:read" → "companydata_read").</summary>
+    /// <summary>Filesystem-safe token for a scenario id ("companydata:read" → "companydata_read",
+    /// "flow:run" → "flow_run", "1" → "1").</summary>
     public static string Sid(string scenarioId)
     {
         var sb = new StringBuilder(scenarioId.Length);
@@ -161,7 +147,7 @@ public sealed class Runtime
     /// <summary>
     /// Materialize a browser-sent PEM to config/keys/&lt;sha1&gt;.pem (0600) and return its ABSOLUTE path —
     /// the value recorded in the config file (the SDK reads keys by path). Content-addressed: identical
-    /// PEM reuses the same file.
+    /// PEM reuses the same file, so two scenarios sharing a service key share the file.
     /// </summary>
     public string MaterializeConfigKey(string pem)
     {
@@ -174,18 +160,44 @@ public sealed class Runtime
         return path;
     }
 
-    // ── runs ─────────────────────────────────────────────────────────────────────
+    // ── runs (generic — each family stores/reads its own run POCO) ─────────────────
 
     public string NewRunId() => Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
 
-    public void WriteRun(string runId, Run run)
+    public void WriteRun<T>(string runId, T run) where T : IRun
     {
         run.RunId = runId;
-        AtomicWrite(Path.Combine(RunsDir, $"{runId}.json"), JsonSerializer.Serialize(run, RunJson));
+        AtomicWrite(Path.Combine(RunsDir, $"{runId}.json"), JsonSerializer.Serialize(run, run!.GetType(), RunJson));
     }
 
-    /// <summary>Read a run, honouring the TTL. Null for unknown/expired ids (idempotent reads).</summary>
-    public Run? ReadRun(string runId)
+    /// <summary>Read a run as the family's POCO, honouring the TTL. Null for unknown/expired ids.</summary>
+    public T? ReadRun<T>(string runId) where T : class
+    {
+        var path = RunPath(runId);
+        if (path is null) return null;
+        try { return JsonSerializer.Deserialize<T>(File.ReadAllText(path), RunJson); }
+        catch (JsonException) { return null; }
+    }
+
+    /// <summary>
+    /// The scenario id recorded in a run file (as a string: identity's numeric ids stringify), so the
+    /// dispatcher can route GET /api/runs/{id} to the owning family without knowing the run's shape. Null
+    /// for an unknown/expired run.
+    /// </summary>
+    public string? ReadRunScenarioId(string runId)
+    {
+        var path = RunPath(runId);
+        if (path is null) return null;
+        try
+        {
+            var probe = JsonSerializer.Deserialize<ScenarioProbe>(File.ReadAllText(path), RunJson);
+            return ScenarioString(probe?.Scenario);
+        }
+        catch (JsonException) { return null; }
+    }
+
+    /// <summary>The run file path if it exists and is within TTL (expired files are swept here), else null.</summary>
+    private string? RunPath(string runId)
     {
         if (!IsRunId(runId)) return null;
         var path = Path.Combine(RunsDir, $"{runId}.json");
@@ -195,24 +207,29 @@ public sealed class Runtime
             TryDelete(path);
             return null;
         }
-        try { return JsonSerializer.Deserialize<Run>(File.ReadAllText(path), RunJson); }
-        catch (JsonException) { return null; }
+        return path;
     }
 
-    // ── webhook routing record (single active webhook run) ────────────────────────
+    private sealed class ScenarioProbe
+    {
+        public JsonElement Scenario { get; set; }
+    }
 
-    /// <summary>
-    /// Persist the single active webhook route {webhookId, runId}, superseding any prior one. A new
-    /// companydata:webhook run calls this on /start; the old run stops receiving (its file stays
-    /// readable until TTL/Clear).
-    /// </summary>
+    private static string? ScenarioString(JsonElement? e) => e?.ValueKind switch
+    {
+        JsonValueKind.String => e.Value.GetString(),
+        JsonValueKind.Number => e.Value.GetRawText(),
+        _ => null,
+    };
+
+    // ── webhook routing record (single active company-data webhook run) ────────────
+
     public void WriteRoute(string webhookId, string runId)
     {
         EnsureDirs();
         AtomicWrite(RoutePath, JsonSerializer.Serialize(new { webhookId, runId }, PlainJson));
     }
 
-    /// <summary>The active webhook route, or null when none is set.</summary>
     public (string WebhookId, string RunId)? ReadRoute()
     {
         if (!File.Exists(RoutePath)) return null;
@@ -234,24 +251,25 @@ public sealed class Runtime
     // ── clear ─────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Per-scenario clear: delete that scenario's runs + config + meta, drop the route when clearing the
-    /// webhook scenario, wipe the shared pump cache, then GC any unreferenced key PEM.
+    /// Per-scenario clear: delete that scenario's runs (matched by the recorded scenario id) + config +
+    /// meta, then GC unreferenced key PEMs. Company-data extras: clearing the webhook scenario drops the
+    /// route, and clearing any company-data scenario wipes the shared pump cache.
     /// </summary>
-    public void ClearScenario(string id)
+    public void ClearScenario(string scenarioId)
     {
         foreach (var path in Directory.EnumerateFiles(RunsDir, "*.json"))
         {
             try
             {
-                var run = JsonSerializer.Deserialize<Run>(File.ReadAllText(path), RunJson);
-                if (run is not null && run.Scenario == id) TryDelete(path);
+                var probe = JsonSerializer.Deserialize<ScenarioProbe>(File.ReadAllText(path), RunJson);
+                if (ScenarioString(probe?.Scenario) == scenarioId) TryDelete(path);
             }
             catch (JsonException) { /* ignore malformed */ }
         }
-        TryDelete(ConfigPathFor(id));
-        TryDelete(MetaPathFor(id));
-        if (id == "companydata:webhook") ClearRoute();
-        RmTree(CacheDir);
+        TryDelete(ConfigPathFor(scenarioId));
+        TryDelete(MetaPathFor(scenarioId));
+        if (scenarioId == "companydata:webhook") ClearRoute();
+        if (scenarioId.StartsWith("companydata:", StringComparison.Ordinal)) RmTree(CacheDir);
         GcConfigKeys();
         EnsureDirs();
     }
@@ -278,9 +296,10 @@ public sealed class Runtime
                 try
                 {
                     using var doc = JsonDocument.Parse(File.ReadAllText(cfgPath));
-                    if (doc.RootElement.TryGetProperty("service_private_key", out var p) &&
-                        p.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(p.GetString()))
-                        referenced.Add(p.GetString()!);
+                    foreach (var field in new[] { "oauth_private_key", "service_private_key" })
+                        if (doc.RootElement.TryGetProperty(field, out var p) &&
+                            p.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(p.GetString()))
+                            referenced.Add(p.GetString()!);
                 }
                 catch (JsonException) { /* ignore malformed */ }
             }
@@ -291,8 +310,9 @@ public sealed class Runtime
 
     // ── helpers ─────────────────────────────────────────────────────────────────
 
+    /// <summary>Accepts both a 32-hex sign-in/data runId and an OIDC library's URL-safe state.</summary>
     public static bool IsRunId(string s) =>
-        s.Length == 32 && s.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+        s.Length is >= 8 and <= 128 && s.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_');
 
     private static JsonElement EmptyObject()
     {

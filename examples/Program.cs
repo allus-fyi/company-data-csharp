@@ -5,13 +5,14 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
-using Allus.CompanyDataExample;
+using Allus.ExampleTestSuite;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging;
 
-// One-command launcher for the company-data example (contract v3, company-data family; README).
+// One-command launcher for the allus company-data SDK example test suite — ALL THREE scenario families
+// (identity + flow + company-data) on ONE server, ONE port (contractVersion 3; see README).
 //
 //   dotnet run
 //
@@ -19,16 +20,16 @@ using Microsoft.Extensions.Logging;
 //   1. wipe .runtime/ (fresh state each boot)
 //   2. on a missing/changed bundle: fetch the pinned frontend release (frontend.lock), VERIFY sha256,
 //      unpack to .frontend/<tag>/  (a present, verified bundle is a cache hit — nothing is re-fetched)
-//   3. assert the bundle's contract.json version == the backend's implemented contractVersion
+//   3. assert the bundle's contract.json version == the backend's implemented contractVersion (3)
 //   4. refuse a busy port with a clear message
 //   5. serve http://localhost:${PORT:-8091} — one Kestrel host; a serializing gate keeps it single-worker
 //      (contract: no cross-request concurrency to guard).
 
-const int ContractVersion = Server.ContractVersion; // 3
+const int ContractVersion = Dispatcher.ContractVersion; // 3
 const string ReleaseBase = "https://github.com/allme-sdk/example-test-suite/releases/download";
 
 var baseDir = FindBaseDir();
-Console.Error.WriteLine("company-data example (csharp) — starting up");
+Console.Error.WriteLine("allus SDK example test suite (csharp) — starting up");
 
 // 1. fresh runtime state
 var rt = new Runtime(baseDir);
@@ -81,7 +82,7 @@ catch (SocketException)
 
 // 5. serve
 var sdkVersion = SdkVersion();
-var server = new Server(rt, sdkVersion);
+var dispatcher = new Dispatcher(rt, sdkVersion);
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders(); // keep stdout to our own messages
@@ -102,18 +103,17 @@ var files = new PhysicalFileProvider(frontendDir);
 app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
 app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
 
-app.MapGet("/api/meta", (HttpContext ctx) => server.Meta(ctx));
-app.MapPost("/api/scenarios/{id}/config", (HttpContext ctx, string id) => server.SaveConfig(ctx, id));
-app.MapPost("/api/scenarios/{id}/start", (HttpContext ctx, string id) => server.Start(ctx, id));
-app.MapPost("/api/scenarios/{id}/clear", async (HttpContext ctx, string id) =>
-{
-    rt.ClearScenario(id);
-    await WriteOk(ctx);
-});
-app.MapGet("/api/runs/{runId}", (HttpContext ctx, string runId) => server.RunStatus(ctx, runId));
-app.MapPost("/api/clear", async (HttpContext ctx) => { rt.ClearAll(); await WriteOk(ctx); });
-// PUBLIC inbound webhook delivery (not under /api/) — company-data family.
-app.MapPost("/webhook", (HttpContext ctx) => server.WebhookReceive(ctx));
+// The whole contract API — one route table for all three families (the dispatcher routes by scenario id).
+app.MapGet("/api/meta", (HttpContext ctx) => dispatcher.Meta(ctx));
+app.MapPost("/api/scenarios/{id}/config", (HttpContext ctx, string id) => dispatcher.SaveConfig(ctx, id));
+app.MapPost("/api/scenarios/{id}/start", (HttpContext ctx, string id) => dispatcher.Start(ctx, id));
+app.MapPost("/api/scenarios/{id}/enroll", (HttpContext ctx, string id) => dispatcher.Enroll(ctx, id));
+app.MapPost("/api/scenarios/{id}/clear", (HttpContext ctx, string id) => dispatcher.ClearScenario(ctx, id));
+app.MapGet("/api/runs/{runId}", (HttpContext ctx, string runId) => dispatcher.RunStatus(ctx, runId));
+app.MapPost("/api/clear", (HttpContext ctx) => dispatcher.ClearAll(ctx));
+// PUBLIC per-family endpoints (not under /api/).
+app.MapGet("/callback", (HttpContext ctx) => dispatcher.Callback(ctx));   // identity OAuth/OIDC redirect leg
+app.MapPost("/webhook", (HttpContext ctx) => dispatcher.Webhook(ctx));    // company-data inbound delivery
 
 // SPA fallback: unknown /api/* → 404 JSON; anything else → index.html (client-side routing).
 app.MapFallback(async (HttpContext ctx) =>
@@ -140,12 +140,6 @@ Console.Error.WriteLine($"serving http://localhost:{port}  (Ctrl-C to stop)");
 app.Run();
 
 // ── helpers ──────────────────────────────────────────────────────────────────
-
-static Task WriteOk(HttpContext ctx)
-{
-    ctx.Response.ContentType = "application/json";
-    return ctx.Response.WriteAsync("{\"ok\":true}");
-}
 
 static string FindBaseDir()
 {

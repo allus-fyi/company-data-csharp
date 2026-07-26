@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 
-namespace Allus.IdentityExample;
+namespace Allus.ExampleTestSuite.Identity;
 
 /// <summary>
 /// PKCE (RFC 7636) verifier + S256 challenge. Pure local crypto — no network, no platform HTTP.

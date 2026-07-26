@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    The allus company-data C# SDK example test suite.
+
+    ONE project that hosts a thin localhost backend implementing the demo-backend
+    contract (contractVersion 3) for ALL THREE scenario families in one server on
+    one port:
+      identity/     — sign in / OIDC / 2FA          (scenarios 1–8)
+      flow/         — run a contract flow            (flow:run)
+      company-data/ — connections / fields / changes / webhooks / documents
+                                                      (the five companydata:*)
+
+    Shared scaffolding (Program / Runtime / Dispatcher / Web) lives at the project
+    root; each family's scenario handlers live in its own folder + namespace, so a
+    reader opens a family's handler file and sees the SDK calls.
+
+    It references the SDK by PROJECT reference (../src) so a reader sees which SDK
+    call implements each scenario. It is NOT part of the published Allus.CompanyData
+    NuGet package: IsPackable=false, it is not in Allus.CompanyData.slnx, and
+    `dotnet pack` on the SDK never sees it.
+
+    The OIDC scenarios (5/6) use the standard third-party IdentityModel.OidcClient —
+    that a real OIDC client drives them is the point of the #314 demonstration.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Allus.ExampleTestSuite</RootNamespace>
+    <AssemblyName>allus-example-test-suite</AssemblyName>
+    <!-- Never pack/publish this example as a NuGet package. -->
+    <IsPackable>false</IsPackable>
+    <!-- Built against the net8.0 LTS surface; roll forward so it runs on any installed >= 8 runtime. -->
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The SDK under test — the intended top-level surface each handler calls. -->
+    <ProjectReference Include="../src/Allus.CompanyData/Allus.CompanyData.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Standard .NET OIDC client for identity scenarios 5/6 (discovery + PKCE + id_token
+         verification; client_secret_post; issuer/endpoint override for local stacks). -->
+    <PackageReference Include="IdentityModel.OidcClient" Version="6.0.0" />
+  </ItemGroup>
+
+</Project>
