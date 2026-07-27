@@ -204,7 +204,7 @@ The frontend ships as a checksummed release asset; the single pin lives in
 `frontend.lock`:
 
 ```json
-{ "tag": "v0.4.0", "sha256": "<sha256 of dist.tar.gz>" }
+{ "tag": "v0.5.0", "sha256": "<sha256 of dist.tar.gz>" }
 ```
 
 To move to a newer release: set `tag` + `sha256` in `frontend.lock`, remove the cached
