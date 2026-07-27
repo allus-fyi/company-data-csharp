@@ -11,18 +11,73 @@ using System.Text.Json;
 
 namespace Allus.CompanyData;
 
-/// <summary>A one_time claim the RP asks for: a field TYPE + an advisory suggestion.</summary>
-public sealed record Claim(string Type, string? Suggest = null, bool Required = false, string? Label = null);
+/// <summary>
+/// A claim the relying party asks for — a REQUEST FIELD (#498).
+///
+/// <para>You describe what you need: a <c>Name</c> (the claim's identity on the wire), a field
+/// <c>Type</c>, an advisory <c>Suggest</c>ion, whether it is <c>Required</c>, and whether only a
+/// #311-<c>Verified</c> answer will do. You never name one of the person's fields — THEY decide which
+/// of theirs answers it.</para>
+///
+/// <para><c>Name</c> is MANDATORY and must be unique within one request: everything downstream is
+/// keyed by it (the stored mapping, the consent outcome, and the <c>Values</c>/<c>Attestations</c>
+/// maps <see cref="OAuthClient.CompleteSignInAsync"/> returns). Two claims sharing a name are
+/// rejected rather than silently coalesced.</para>
+///
+/// <para><c>Verified</c> is accepted only where it can be honoured (#498 §3.1b): on the OIDC flow,
+/// and only for a type #311 can attest (v1: <c>email</c>). Sending it on a <c>one_time</c> request is
+/// refused with <c>invalid_request</c> — that leg carries no source row id, so the server could
+/// neither enforce the requirement nor attest it.</para>
+/// </summary>
+public sealed record Claim(
+    string Name,
+    string Type,
+    string? Suggest = null,
+    bool Required = false,
+    bool Verified = false,
+    string? Label = null);
 
-/// <summary>The decrypted conclusion of <see cref="OAuthClient.CompleteSignInAsync"/>.</summary>
+/// <summary>
+/// Proof that a delivered value is the #311-verified one (#498 §3.1a).
+///
+/// <para>Present only for a <c>Verified</c> claim under ENCRYPTED delivery. The server builds and
+/// seals it against your app key — a client-supplied attestation is never accepted — so it attests
+/// the server's own record of the row the person chose, which is what makes it evidence.</para>
+///
+/// <para><c>Verified</c> is computed BY THIS SDK, in constant time, over the plaintext it just
+/// decrypted; it is never passed through from the server. <b>A <c>Verified == false</c> entry means
+/// MISMATCH and you MUST reject the value.</b> A claim ABSENT from <c>Attestations</c> means "not
+/// attested" — never "wrong" — and must be treated as unverified.</para>
+///
+/// <para><c>VerifiedAt</c> carries the snapshot caveat: it attests the value as verified AT THAT
+/// MOMENT, not verified today. A field loses its verification whenever the person re-saves it.</para>
+/// </summary>
+/// <param name="Verified">Recomputed here, constant-time; false = MISMATCH, reject the value.</param>
+/// <param name="Hash">Lowercase hex.</param>
+/// <param name="Salt">Lowercase hex.</param>
+/// <param name="VerifiedAt">When the field was verified — a snapshot, not verified-today.</param>
+public sealed record Attestation(bool Verified, string Hash, string Salt, string VerifiedAt);
+
+/// <summary>
+/// The decrypted conclusion of <see cref="OAuthClient.CompleteSignInAsync"/>.
+///
+/// <para>#498 §5: <c>Sub</c> IS the person's SHARE CODE and is byte-identical to the id_token's
+/// <c>sub</c>; <c>ShareCode</c> is retained beside it and now simply equals it. <c>DisplayName</c> is
+/// GONE — it is a consented <c>name</c> claim now, or nothing: ask for
+/// <c>new Claim("name", "text")</c> and read <c>Values["name"]</c>.</para>
+///
+/// <para>#498 §3.1a: <c>Attestations</c> is an ADDITIVE sibling map keyed by the SAME claim name as
+/// <c>Values</c>, present only for a <c>Verified</c> claim under ENCRYPTED delivery. An integration
+/// that never reads it behaves exactly as before.</para>
+/// </summary>
 public sealed class SignInResult
 {
     public string? Sub { get; init; }
     public string? ShareCode { get; init; }
-    public string? DisplayName { get; init; }
     public string? Mode { get; init; }
     public bool TwoFactor { get; init; }
     public IReadOnlyDictionary<string, string> Values { get; init; } = new Dictionary<string, string>();
+    public IReadOnlyDictionary<string, Attestation> Attestations { get; init; } = new Dictionary<string, Attestation>();
 }
 
 /// <summary>The RP-side "Sign in with allme" client.</summary>
@@ -102,12 +157,21 @@ public sealed class OAuthClient
     {
         var outList = new List<Dictionary<string, object>>();
         if (claims is null) return outList;
+        var seen = new HashSet<string>();
         foreach (var c in claims)
         {
             if (string.IsNullOrEmpty(c.Type) || NonClaimable.Contains(c.Type)) continue;
-            var entry = new Dictionary<string, object> { ["type"] = c.Type };
+            // #498 §2: `Name` is the claim's identity and it is mandatory. Refused HERE rather than
+            // left to the API, so the integration error surfaces at the call that made it.
+            var name = (c.Name ?? string.Empty).Trim();
+            if (name.Length == 0)
+                throw new ConfigException("every claim must carry a `Name` (#498)");
+            if (!seen.Add(name))
+                throw new ConfigException($"duplicate claim name '{name}' (#498)");
+            var entry = new Dictionary<string, object> { ["name"] = name, ["type"] = c.Type };
             if (!string.IsNullOrEmpty(c.Suggest)) entry["suggest"] = c.Suggest;
             if (c.Required) entry["required"] = true;
+            if (c.Verified) entry["verified"] = true;
             if (!string.IsNullOrEmpty(c.Label)) entry["label"] = c.Label;
             outList.Add(entry);
             if (outList.Count >= MaxClaims) break;
@@ -148,17 +212,67 @@ public sealed class OAuthClient
             throw new AuthException("token exchange returned no access_token");
         var info = await UserinfoAsync(accessToken!, ct).ConfigureAwait(false);
         var values = new Dictionary<string, string>();
+        var attestations = new Dictionary<string, Attestation>();
         if (info.TryGetProperty("values", out var vals) && vals.ValueKind == JsonValueKind.Object)
+        {
             values = DecryptValues(vals);
+            if (info.TryGetProperty("values_attestation", out var att) && att.ValueKind == JsonValueKind.Object)
+                attestations = DecryptAttestations(att, values);
+        }
         return new SignInResult
         {
             Sub = Str(info, "sub"),
             ShareCode = Str(info, "share_code"),
-            DisplayName = Str(info, "display_name"),
             Mode = Str(info, "mode") ?? Str(token, "mode"),
             TwoFactor = info.TryGetProperty("two_factor", out var tf) && tf.ValueKind == JsonValueKind.True,
             Values = values,
+            Attestations = attestations,
         };
+    }
+
+    /// <summary>
+    /// #498 §3.1a — open the app-key-sealed attestations and attest each value ourselves.
+    ///
+    /// <para>A SECOND decrypt per verified claim: <c>Values</c> is byte-identical to before, but each
+    /// attestation is its own <c>{"_enc":1,...}</c> object. A passthrough accessor handing back an
+    /// undecrypted blob would not be an implementation of this.</para>
+    ///
+    /// <para>An attestation that cannot be opened or parsed is DROPPED, not surfaced as
+    /// <c>Verified == false</c> — absence means "not attested" and a mismatch means "reject the
+    /// value", and conflating the two would turn a key or transport problem into an accusation that
+    /// the data was tampered with.</para>
+    /// </summary>
+    private Dictionary<string, Attestation> DecryptAttestations(JsonElement raw, Dictionary<string, string> values)
+    {
+        var outMap = new Dictionary<string, Attestation>();
+        var pem = File.ReadAllText(_config.OAuthPrivateKey!);
+        using RSA key = Crypto.LoadPrivateKey(pem, _config.OAuthKeyPassphrase!);
+        foreach (var prop in raw.EnumerateObject())
+        {
+            if (!values.TryGetValue(prop.Name, out var plaintext)) continue;
+            JsonElement parsed;
+            try
+            {
+                using var doc = JsonDocument.Parse(Crypto.Decrypt(prop.Value, key));
+                parsed = doc.RootElement.Clone();
+            }
+            catch (Exception)
+            {
+                continue;
+            }
+            if (parsed.ValueKind != JsonValueKind.Object) continue;
+            var hash = Str(parsed, "hash");
+            var salt = Str(parsed, "salt");
+            if (string.IsNullOrEmpty(hash) || string.IsNullOrEmpty(salt)) continue;
+            outMap[prop.Name] = new Attestation(
+                // Recomputed here, constant-time, over the plaintext just decrypted — never trusted
+                // from the server. false = the delivered value is NOT the verified one; reject it.
+                Crypto.HashMatches(salt!, hash!, plaintext),
+                hash!,
+                salt!,
+                Str(parsed, "verified_at") ?? string.Empty);
+        }
+        return outMap;
     }
 
     private Dictionary<string, string> DecryptValues(JsonElement values)

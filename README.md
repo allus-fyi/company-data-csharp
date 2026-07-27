@@ -960,11 +960,30 @@ ports, not merely self-consistently.
 var oauth = OAuthClient.FromConfig("idw-config.json");
 var url = oauth.AuthorizeUrl("signin", state: state, codeChallenge: ch);
 // ...user approves; your redirect receives ?code=...
-var res = await oauth.CompleteSignInAsync(code, verifier); // res.DisplayName, res.Mode, res.Values
+var res = await oauth.CompleteSignInAsync(code, verifier); // res.Sub, res.Mode, res.Values, res.Attestations
 ```
 
 Modes: `signin` | `one_time` (claim values decrypted for you) | `connect` |
 `2fa_enroll` (opt a person into 2FA — see below). `PollResultAsync(state)` drives the detached mode.
+
+**#498 — a claim IS a request field.** You describe what you need and the **person** picks which of their
+own fields answers it; you never name a field. A claim carries a mandatory unique `name` (everything that
+comes back is keyed by it — `values`, `attestations`, and their stored choice for a repeat login), a field
+`type`, an optional suggested slug, `required`, and `verified` ("only a #311-verified answer will do"). A
+nameless or duplicate claim raises a config error at the call rather than failing at the API. `verified` is
+accepted only on the OIDC flow and only for a type allme can verify (today `email`); elsewhere it is
+refused with `invalid_request` rather than quietly dropped.
+
+The sign-in result carries `values` **and** `attestations`.
+* `sub` **is** the person's share code and equals `share_code` — byte-identical to the id_token's `sub`.
+  `display_name` is gone: ask for a `name` claim and read the value under that key.
+* `attestations` is an additive sibling map keyed by the same claim name, present only for a `verified`
+  claim under encrypted delivery. Each entry carries a `verified` boolean **the SDK computes itself**, in
+  constant time, over the plaintext it just decrypted — plus the raw hash/salt/verifiedAt.
+  **A slug ABSENT from the map is "not attested", never "wrong"** (treat that value as unverified);
+  **an entry present with `verified` false is a MISMATCH and you must reject the value.** The timestamp
+  attests the value as verified *at that moment*, not verified today.
+
 
 ## 2FA by allme (#436, #481)
 

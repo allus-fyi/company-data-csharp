@@ -376,10 +376,13 @@ public sealed class IdentityHandlers
 
         var result = new Dictionary<string, object?>
         {
-            ["user"] = new { sub = res.Sub, share_code = res.ShareCode, display_name = res.DisplayName },
+            // #498: `sub` IS the share code, and there is no display name any more — it is a consented
+            // `name` claim, or nothing. `attestations` is the additive proof map for verified claims.
+            ["user"] = new { sub = res.Sub, share_code = res.ShareCode },
             ["mode"] = res.Mode,
             ["two_factor"] = res.TwoFactor,
             ["values"] = res.Values,
+            ["attestations"] = res.Attestations,
         };
 
         if (id == 4)
@@ -512,7 +515,10 @@ public sealed class IdentityHandlers
                     arr.ValueKind == JsonValueKind.Array
             ? arr.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!)
             : Enumerable.Empty<string>();
-        return types.Select(t => new Claim(t)).ToList();
+        // #498: a claim carries a mandatory, unique Name — the key Values and Attestations come back
+        // under. The demo's config lists claim TYPES, so the type doubles as the name here; a real
+        // integration usually names them for its own domain ("billing_email").
+        return types.Select(t => new Claim(t, t)).ToList();
     }
 
     private static bool IsRunnable(int id) => Scenarios.TryGetValue(id, out var k) && k == "runnable";

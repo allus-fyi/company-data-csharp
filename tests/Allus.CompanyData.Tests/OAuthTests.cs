@@ -71,21 +71,48 @@ public class OAuthTests
     public void AuthorizeUrlClaimValidation()
     {
         var c = new OAuthClient(IdwCfg(), new QueueTransport());
+        // #498: every claim carries a mandatory Name — the identity everything downstream is keyed by.
         var claims = new[]
         {
-            new Claim("email", "email_personal"),
-            new Claim("photo"),
-            new Claim("phone", Required: true),
-            new Claim(""),
+            new Claim("email", "email", "email_personal"),
+            new Claim("avatar", "photo"),
+            new Claim("phone", "phone", Required: true),
+            new Claim("nothing", ""),
         };
         var (_, q) = ParseUrl(c.AuthorizeUrl("one_time", claims));
         using var doc = JsonDocument.Parse(q["claims"]);
         var arr = doc.RootElement;
         Assert.Equal(2, arr.GetArrayLength());
+        Assert.Equal("email", arr[0].GetProperty("name").GetString());
         Assert.Equal("email", arr[0].GetProperty("type").GetString());
         Assert.Equal("email_personal", arr[0].GetProperty("suggest").GetString());
+        Assert.Equal("phone", arr[1].GetProperty("name").GetString());
         Assert.Equal("phone", arr[1].GetProperty("type").GetString());
         Assert.True(arr[1].GetProperty("required").GetBoolean());
+    }
+
+    /// #498 §2: a nameless claim, and two sharing a name, are refused at the call that made them.
+    [Fact]
+    public void AuthorizeUrlClaimNameRequired()
+    {
+        var c = new OAuthClient(IdwCfg(), new QueueTransport());
+        Assert.Throws<ConfigException>(() => c.AuthorizeUrl("one_time", new[] { new Claim("", "email") }));
+        Assert.Throws<ConfigException>(() => c.AuthorizeUrl("one_time", new[]
+        {
+            new Claim("email", "email"),
+            new Claim("email", "text"),
+        }));
+    }
+
+    /// #498 §3: `verified` travels on the wire, so an RP can demand a #311-attested answer.
+    [Fact]
+    public void AuthorizeUrlClaimVerified()
+    {
+        var c = new OAuthClient(IdwCfg(), new QueueTransport());
+        var (_, q) = ParseUrl(c.AuthorizeUrl("signin", new[] { new Claim("email", "email", Verified: true) }));
+        using var doc = JsonDocument.Parse(q["claims"]);
+        Assert.Single(doc.RootElement.EnumerateArray());
+        Assert.True(doc.RootElement[0].GetProperty("verified").GetBoolean());
     }
 
     [Fact]
@@ -93,7 +120,7 @@ public class OAuthTests
     {
         var c = new OAuthClient(IdwCfg(), new QueueTransport());
         var claims = new List<Claim>();
-        for (var i = 0; i < 30; i++) claims.Add(new Claim("text"));
+        for (var i = 0; i < 30; i++) claims.Add(new Claim($"c{i}", "text"));
         var (_, q) = ParseUrl(c.AuthorizeUrl("one_time", claims));
         using var doc = JsonDocument.Parse(q["claims"]);
         Assert.Equal(15, doc.RootElement.GetArrayLength());
@@ -112,14 +139,17 @@ public class OAuthTests
     {
         var t = new QueueTransport();
         t.PostResponses.Enqueue(Resp.Json(200, new { access_token = "AT", mode = "signin" }));
-        t.GetResponses.Enqueue(Resp.Json(200, new { sub = "u1", share_code = "AB12CD", display_name = "Alice", mode = "signin", two_factor = false }));
+        t.GetResponses.Enqueue(Resp.Json(200, new { sub = "AB12CD", share_code = "AB12CD", mode = "signin", two_factor = false }));
         var c = new OAuthClient(IdwCfg(), t);
         var tok = await c.ExchangeCodeAsync("CODE", "V");
         Assert.Equal("AT", tok.GetProperty("access_token").GetString());
         Assert.Equal("authorization_code", t.Posts[0].Form["grant_type"]);
         Assert.Equal("V", t.Posts[0].Form["code_verifier"]);
         var info = await c.UserinfoAsync("AT");
-        Assert.Equal("Alice", info.GetProperty("display_name").GetString());
+        // #498 §5: `sub` IS the share code (byte-identical to the id_token's); display_name is gone.
+        Assert.Equal("AB12CD", info.GetProperty("sub").GetString());
+        Assert.Equal(info.GetProperty("share_code").GetString(), info.GetProperty("sub").GetString());
+        Assert.False(info.TryGetProperty("display_name", out _));
     }
 
     [Fact]
@@ -132,8 +162,8 @@ public class OAuthTests
         t.PostResponses.Enqueue(Resp.Json(200, new { access_token = "AT", mode = "one_time" }));
         t.GetResponses.Enqueue(Resp.Json(200, new
         {
-            sub = "u1",
-            display_name = "Alice",
+            sub = "AB12CD",
+            share_code = "AB12CD",
             mode = "one_time",
             two_factor = true,
             values = new Dictionary<string, object> { ["email_personal"] = Vector.TextWrapper },
@@ -142,8 +172,12 @@ public class OAuthTests
         var res = await c.CompleteSignInAsync("CODE", "V");
         Assert.Equal("one_time", res.Mode);
         Assert.True(res.TwoFactor);
-        Assert.Equal("Alice", res.DisplayName);
+        // #498 §5: Sub IS the share code (byte-identical to the id_token's); DisplayName is gone.
+        Assert.Equal("AB12CD", res.Sub);
+        Assert.Equal(res.Sub, res.ShareCode);
         Assert.Equal(Vector.TextPlaintext, res.Values["email_personal"]);
+        // #498 §3.1a: no `values_attestation` on the wire → "not attested", never "wrong".
+        Assert.Empty(res.Attestations);
     }
 
     // ── detached poll ──────────────────────────────────────────────────────
