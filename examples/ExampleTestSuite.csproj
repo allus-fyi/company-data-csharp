@@ -15,10 +15,13 @@
     root; each family's scenario handlers live in its own folder + namespace, so a
     reader opens a family's handler file and sees the SDK calls.
 
-    It references the SDK by PROJECT reference (../src) so a reader sees which SDK
-    call implements each scenario. It is NOT part of the published Allus.CompanyData
-    NuGet package: IsPackable=false, it is not in Allus.CompanyData.slnx, and
-    `dotnet pack` on the SDK never sees it.
+    In a repository checkout it references the SDK by PROJECT reference (../src) so a
+    reader sees which SDK call implements each scenario; from an extracted package it
+    falls back to a PackageReference (see the ItemGroup below). It is not a separately
+    published package: it is a separate project and is not in the SDK solution — but
+    since #493 its SOURCE ships inside the Allus.CompanyData nupkg (at examples/), so an
+    installing developer does get it. IsPackable=false keeps it from being published as
+    its own package.
 
     The OIDC scenarios (5/6) use the standard third-party IdentityModel.OidcClient —
     that a real OIDC client drives them is the point of the #314 demonstration.
@@ -40,7 +43,15 @@
 
   <ItemGroup>
     <!-- The SDK under test — the intended top-level surface each handler calls. -->
-    <ProjectReference Include="../src/Allus.CompanyData/Allus.CompanyData.csproj" />
+    <!-- Resolved by context (#493): the suite's SOURCE ships inside the published
+         Allus.CompanyData package, and that nupkg carries lib/net8.0 + examples/ but NOT
+         src/, so a ProjectReference cannot resolve from an installed copy. In a repository
+         checkout the project reference is used (the suite exercises the working tree, as
+         before); everywhere else the matching released package is. -->
+    <ProjectReference Include="../src/Allus.CompanyData/Allus.CompanyData.csproj"
+                      Condition="Exists('../src/Allus.CompanyData/Allus.CompanyData.csproj')" />
+    <PackageReference Include="Allus.CompanyData" Version="0.0.13"
+                      Condition="!Exists('../src/Allus.CompanyData/Allus.CompanyData.csproj')" />
   </ItemGroup>
 
   <ItemGroup>

@@ -73,9 +73,12 @@ that only one example runs at a time.
   Releases (subsequent runs use the verified local cache).
 
 The example is **`IsPackable=false`** and is not in `Allus.CompanyData.slnx`, so it is
-never packed into the published NuGet package; it references the SDK by **project
-reference** (`../src`), which is why a reader sees exactly which SDK call implements
-each scenario.
+never published as a NuGet package of its own — but since #493 its **source ships
+inside** the `Allus.CompanyData` nupkg at `examples/`, so an installing developer gets
+it. It resolves the SDK **by context**: a **project reference** (`../src`) in a
+repository checkout, which is why a reader sees exactly which SDK call implements each
+scenario, and a **package reference** to the released `Allus.CompanyData` when run from
+an extracted package (where `src/` does not exist).
 
 ---
 
@@ -181,7 +184,7 @@ Either way the same run **also polls the change feed** as an always-works fallba
 
 | Path | What it is |
 |---|---|
-| `ExampleTestSuite.csproj` | The single example project — the SDK via project reference + the OIDC library. `IsPackable=false`; excluded from the published NuGet package. |
+| `ExampleTestSuite.csproj` | The single example project — the SDK by project reference in a checkout / package reference from an extracted package, plus the OIDC library. `IsPackable=false` (not published as its own package), but its **source ships inside** the SDK's nupkg at `examples/` (#493). |
 | `Program.cs` | The one-command launcher + Kestrel host + the one route table for all three families. |
 | `Runtime.cs` | Shared cross-request state store: config files + generic run store + TTL sweep + Clear + the webhook routing record + the pump cache dir. |
 | `Dispatcher.cs` | Routes each request to the owning family by scenario id; merges the combined `/api/meta` scenario list. |

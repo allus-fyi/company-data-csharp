@@ -39,6 +39,17 @@
 
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="\" Condition="Exists('../../README.md')" />
+    <!--
+      Ship the example suite's SOURCE inside the published package (#493), while keeping
+      every build/runtime transient out. The suite stays its own project (IsPackable=false,
+      not in the solution) — it is simply carried along by the SDK package rather than
+      published separately.
+    -->
+    <None Include="../../examples/**/*"
+          Exclude="../../examples/**/bin/**;../../examples/**/obj/**;../../examples/**/.runtime/**;../../examples/**/.frontend/**;../../examples/**/*.frontend.download.tar.gz"
+          Pack="true"
+          PackagePath="examples/"
+          Condition="Exists('../../examples')" />
   </ItemGroup>
 
 </Project>
