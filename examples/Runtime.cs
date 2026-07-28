@@ -347,3 +347,33 @@ public sealed class Runtime
         catch (IOException) { /* best-effort */ }
     }
 }
+
+// ── the "what just happened" trace (#578) ──────────────────────────────────────
+
+/// <summary>
+/// The run trace shared by all three scenario families (standards §1). Several handlers can run twice for
+/// one run — /callback carries no already-completed guard, and the flow / company-data poll loops
+/// legitimately re-attempt the same call on every poll — so an unconditional append writes the same line
+/// again. The trace must read as what the run DID.
+///
+/// <para><b>RECORD AT ATTEMPT TIME: call this IMMEDIATELY BEFORE the SDK call it names, never after.</b>
+/// A run that ends `failed` is still a run the panel reports, and the call the reader most needs to see is
+/// the one that threw — a bad client secret, a 429, a decrypt failure. An append placed after the call is
+/// skipped by the very exception the reader is trying to understand, so the panel would say only that the
+/// client was constructed. This is the same under-reporting #578 exists to remove, one path further in;
+/// the rule is the invariant, not a per-scenario habit. A bulk call records one entry per attempt, so a
+/// partial run shows exactly how far it got.</para>
+/// </summary>
+public static class Trace
+{
+    /// <summary>
+    /// Append a call name preserving first-occurrence order and skipping a repeat. Returns true when the
+    /// name was newly added, so the caller can persist on that transition.
+    /// </summary>
+    public static bool Add(List<string> calls, string name)
+    {
+        if (calls.Contains(name)) return false;
+        calls.Add(name);
+        return true;
+    }
+}

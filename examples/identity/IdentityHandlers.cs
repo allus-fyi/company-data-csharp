@@ -65,6 +65,41 @@ public sealed class IdentityHandlers
     private const string DefaultApiUrl = "https://api.allme.fyi";
     private static readonly string DefaultAuthorizeBase = OAuthClient.DefaultAuthorizeUrl; // https://web.allme.fyi/auth
 
+    // The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+    // scenario>`, appended AT the call site, in the order the calls were made; an entry wrapped in
+    // parentheses is a step that is deliberately NOT an SDK call. The annotations are byte-identical in
+    // all six SDK examples — only the method reference is written in the language's own idiom — so one
+    // scenario teaches one thing whichever example a reader starts. Keep them in step when this handler
+    // changes: the panel is headed "What just happened", and a list that no longer matches the code is
+    // worse than a short one.
+    private const string CallIdwBuild = "OAuthClient.FromConfig — builds the RP client from the saved config file: client id, secret and the registered redirect URI";
+    private const string CallIdwBuildLocal = "new OAuthClient(Config.FromIdwFile(…)) — builds the RP client from the saved config file: client id, secret and the registered redirect URI";
+    private const string CallAuthSignin = "OAuthClient.AuthorizeUrl — the consent URL the person is sent to (mode signin, response_mode redirect, PKCE S256, state = this run id)";
+    private const string CallAuthSigninDetached = "OAuthClient.AuthorizeUrl — the sign-in URL behind the link + QR (mode signin, response_mode detached, PKCE S256, state = this run id)";
+    private const string CallAuthOneTime = "OAuthClient.AuthorizeUrl — the consent URL the person is sent to (mode one_time, claims email + phone, PKCE S256, state = this run id)";
+    private const string CallAuthConnect = "OAuthClient.AuthorizeUrl — the consent URL the person is sent to (mode connect, PKCE S256, state = this run id)";
+    private const string CallAuthEnroll = "OAuthClient.AuthorizeUrl — the enrollment URL the person is sent to (mode 2fa_enroll, response_mode redirect)";
+    private const string CallAuthEnrollDetached = "OAuthClient.AuthorizeUrl — the enrollment URL behind the link + QR (mode 2fa_enroll, response_mode detached)";
+    private const string CallPollSignin = "OAuthClient.PollResultAsync — polls POST /oauth2/result until the phone delivers the code (one 2s-bounded call per browser poll)";
+    private const string CallPollEnroll = "OAuthClient.PollResultAsync — polls POST /oauth2/result until the phone delivers {enrolled: true} (one 2s-bounded call per browser poll)";
+    private const string CallCompleteSignin = "OAuthClient.CompleteSignInAsync — exchanges the code + PKCE verifier at POST /oauth2/token, then reads GET /api/oauth/userinfo; mode signin returns the identity only, no claim values";
+    private const string CallCompleteOneTime = "OAuthClient.CompleteSignInAsync — exchanges the code + PKCE verifier at POST /oauth2/token, reads GET /api/oauth/userinfo, and decrypts every claim value with the OAuth app private key";
+    private const string CallCompleteConnect = "OAuthClient.CompleteSignInAsync — exchanges the code + PKCE verifier at POST /oauth2/token, then reads GET /api/oauth/userinfo; connect delivers no values here, the live ones come from the data client below";
+    private const string CallEnrolledCallback = "(callback ?enrolled=true) — the redirect-leg enrollment outcome; there is nothing to exchange, so no further SDK call";
+    private const string CallServiceBuild = "Client.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase";
+    private const string CallConnectionsLive = "Client.ConnectionsAsync — pages GET /api/company-data/connections and decrypts each person's values with the service key; the run keeps the one whose share code just signed in";
+    private const string CallTwoFactor = "Client.TwoFactor — the service-2FA sub-client, on the same data-client credentials";
+    private const string CallChallenge = "TwoFactorClient.ChallengeAsync — POST /api/service-2fa/challenges for the person's share code with a per-run idempotency key; returns the challenge id, plus matching digits when the service has number matching on";
+    private const string CallWaitResult = "TwoFactorClient.WaitForResultAsync — polls GET /api/service-2fa/challenges/{id} until the status leaves pending: approved, denied, expired or revoked (one 2s-bounded call per browser poll; the first terminal read burns the result)";
+    private const string CallOidcPrepare = "(oidc) OidcClient.PrepareLoginAsync — discovery and the authorization URL in one library call (scope openid profile email, PKCE S256, nonce, state = this run id)";
+    private const string CallOidcComplete = "(oidc) OidcClient.ProcessResponseAsync — exchanges the code at the discovered token endpoint (client_secret_post + PKCE verifier), then verifies the id_token against the JWKS: signature, issuer, audience and nonce; the claims shown are that verified token's";
+
+    /// <summary>
+    /// Record a call on the run's "what just happened" trace through the shared, deduping implementation
+    /// (#578, standards §1) — the identity family used to add unconditionally.
+    /// </summary>
+    private static void AddCall(Run run, string name) => Trace.Add(run.Calls, name);
+
     /// <summary>
     /// Refusal when the request carries no Host header, so the browser's origin is unknown (#574). There is
     /// NO default host: substituting one (localhost) silently sends the round-trip to a DIFFERENT origin
@@ -172,9 +207,10 @@ public sealed class IdentityHandlers
                 run.Verifier = verifier;
                 var mode = id == 1 ? "signin" : id == 3 ? "one_time" : "connect";
                 var claims = id == 3 ? ClaimObjects(id) : null;
+                AddCall(run, IdwBuildCall(id));
+                AddCall(run, id == 3 ? CallAuthOneTime : id == 4 ? CallAuthConnect : CallAuthSignin);
                 var oauth = OAuthClientFor(id);
                 var url = oauth.AuthorizeUrl(mode, claims, runId, "redirect", challenge);
-                run.Calls.Add("OAuthClient.AuthorizeUrl");
                 _rt.WriteRun(runId, run);
                 await Web.WriteJson(ctx, new { runId, action = new { type = "redirect", url } });
                 return;
@@ -185,9 +221,10 @@ public sealed class IdentityHandlers
                 var (verifier, challenge) = Pkce.Generate();
                 run.Verifier = verifier;
                 run.Wait = "detached_signin";
+                AddCall(run, IdwBuildCall(id));
+                AddCall(run, CallAuthSigninDetached);
                 var oauth = OAuthClientFor(id);
                 var url = oauth.AuthorizeUrl("signin", null, runId, "detached", challenge);
-                run.Calls.Add("OAuthClient.AuthorizeUrl");
                 _rt.WriteRun(runId, run);
                 await Web.WriteJson(ctx, new { runId, action = new { type = "detached", url } });
                 return;
@@ -204,7 +241,7 @@ public sealed class IdentityHandlers
                 run.State = oidcRunId;
                 run.Verifier = authState.CodeVerifier;
                 run.RedirectUri = authState.RedirectUri;
-                run.Calls.Add("(oidc) OidcClient.PrepareLoginAsync");
+                AddCall(run, CallOidcPrepare);
                 _rt.WriteRun(oidcRunId, run);
                 await Web.WriteJson(ctx, new { runId = oidcRunId, action = new { type = "redirect", url = authState.StartUrl } });
                 return;
@@ -217,11 +254,12 @@ public sealed class IdentityHandlers
                 var context = Web.Str(meta, "context") is { Length: > 0 } c ? c : null;
                 var idempotencyKey = ("demo-" + runId)[..Math.Min(64, ("demo-" + runId).Length)];
                 run.Wait = "challenge";
+                AddCall(run, CallServiceBuild);
+                AddCall(run, CallTwoFactor);
+                AddCall(run, CallChallenge);
                 var client = ServiceClientFor(id);
                 var challenge = await client.TwoFactor.ChallengeAsync(shareCode, idempotencyKey, context);
                 run.ChallengeId = challenge.ChallengeId;
-                run.Calls.Add("Client.TwoFactor");
-                run.Calls.Add("TwoFactorClient.ChallengeAsync");
                 _rt.WriteRun(runId, run);
                 await Web.WriteJson(ctx, new { runId, action = new { type = "challenge", matchingDigits = challenge.MatchingDigits } });
                 return;
@@ -251,7 +289,8 @@ public sealed class IdentityHandlers
             State = runId,
             Wait = responseMode == "detached" ? "detached_enroll" : "enroll_redirect",
         };
-        run.Calls.Add("OAuthClient.AuthorizeUrl");
+        AddCall(run, IdwBuildCall(id));
+        AddCall(run, responseMode == "detached" ? CallAuthEnrollDetached : CallAuthEnroll);
         _rt.WriteRun(runId, run);
 
         object action = responseMode == "detached"
@@ -276,7 +315,7 @@ public sealed class IdentityHandlers
                 // Redirect-leg enrollment outcome (#436) — nothing to exchange; record it.
                 run.Status = "done";
                 run.Result = new { enrolled = true };
-                run.Calls.Add("callback(enrolled=true)");
+                AddCall(run, CallEnrolledCallback);
             }
             else if (ctx.Request.Query["code"].ToString() is { Length: > 0 } code)
             {
@@ -332,18 +371,18 @@ public sealed class IdentityHandlers
             {
                 case "detached_signin":
                 {
+                    AddCall(run, CallPollSignin);
                     var oauth = OAuthClientFor(id, shortTimeout: true);
                     var body = await oauth.PollResultAsync(run.State!, 2, 2);
-                    run.Calls.Add("OAuthClient.PollResultAsync");
                     if (body.TryGetProperty("code", out var codeEl) && codeEl.GetString() is { Length: > 0 } code)
                         run = await CompleteSignin(run, code);
                     break;
                 }
                 case "detached_enroll":
                 {
+                    AddCall(run, CallPollEnroll);
                     var oauth = OAuthClientFor(id, shortTimeout: true);
                     var body = await oauth.PollResultAsync(run.State!, 2, 2);
-                    run.Calls.Add("OAuthClient.PollResultAsync");
                     if (body.TryGetProperty("enrolled", out var en) && en.ValueKind == JsonValueKind.True)
                     {
                         run.Status = "done";
@@ -353,9 +392,9 @@ public sealed class IdentityHandlers
                 }
                 case "challenge":
                 {
+                    AddCall(run, CallWaitResult);
                     var client = ServiceClientFor(id, shortTimeout: true);
                     var res = await client.TwoFactor.WaitForResultAsync(run.ChallengeId!, 2, 2);
-                    run.Calls.Add("TwoFactorClient.WaitForResultAsync");
                     run.Status = "done";
                     run.Result = new { status = res.Status, completed_at = res.CompletedAt };
                     break;
@@ -387,9 +426,9 @@ public sealed class IdentityHandlers
     private async Task<Run> CompleteSignin(Run run, string code)
     {
         var id = run.Scenario;
+        AddCall(run, id == 3 ? CallCompleteOneTime : id == 4 ? CallCompleteConnect : CallCompleteSignin);
         var oauth = OAuthClientFor(id);
         var res = await oauth.CompleteSignInAsync(code, run.Verifier);
-        run.Calls.Add("OAuthClient.CompleteSignInAsync");
 
         var result = new Dictionary<string, object?>
         {
@@ -406,7 +445,9 @@ public sealed class IdentityHandlers
         {
             // Connect: read the person's LIVE values via the service data client, matched by share_code.
             var shareCode = res.ShareCode ?? "";
+            AddCall(run, CallServiceBuild);
             var client = ServiceClientFor(id);
+            AddCall(run, CallConnectionsLive);
             var live = new Dictionary<string, string?>();
             await foreach (var conn in client.ConnectionsAsync())
             {
@@ -417,7 +458,6 @@ public sealed class IdentityHandlers
                     break;
                 }
             }
-            run.Calls.Add("Client.ConnectionsAsync");
             result["live_values"] = live;
         }
 
@@ -438,8 +478,8 @@ public sealed class IdentityHandlers
             RedirectUri = run.RedirectUri ?? ConfigRedirectUri(run.Scenario, ctx),
         };
         var data = ctx.Request.QueryString.Value?.TrimStart('?') ?? "";
+        AddCall(run, CallOidcComplete);
         var result = await oidc.ProcessResponseAsync(data, authState);
-        run.Calls.Add("(oidc) OidcClient.ProcessResponseAsync");
         if (result.IsError)
             throw new InvalidOperationException(result.Error ?? "OIDC response error");
 
@@ -461,11 +501,25 @@ public sealed class IdentityHandlers
     {
         var path = _rt.ConfigPathFor(id.ToString());
         IHttpTransport? transport = shortTimeout ? new HttpTransport(PollHttp) : null;
-        var baseUrl = Web.Str(_rt.ReadConfigMeta(id.ToString()), "authorize_base") ?? "";
-        if (baseUrl.Length == 0 || baseUrl == OAuthClient.DefaultAuthorizeUrl)
+        if (UsesDefaultAuthorizeBase(id))
             return OAuthClient.FromConfig(path, transport);
+        var baseUrl = Web.Str(_rt.ReadConfigMeta(id.ToString()), "authorize_base") ?? "";
         return new OAuthClient(Config.FromIdwFile(path), transport, authorizeUrl: baseUrl);
     }
+
+    /// <summary>
+    /// Whether <see cref="OAuthClientFor"/> takes the named-constructor branch. The SAME predicate decides
+    /// the client AND the trace entry, so the panel can never name a constructor that did not run (#578) —
+    /// the local-stack option really does build the client a different way.
+    /// </summary>
+    private bool UsesDefaultAuthorizeBase(int id)
+    {
+        var baseUrl = Web.Str(_rt.ReadConfigMeta(id.ToString()), "authorize_base") ?? "";
+        return baseUrl.Length == 0 || baseUrl == OAuthClient.DefaultAuthorizeUrl;
+    }
+
+    /// <summary>The trace entry for the OAuth client <see cref="OAuthClientFor"/> just built (#578).</summary>
+    private string IdwBuildCall(int id) => UsesDefaultAuthorizeBase(id) ? CallIdwBuild : CallIdwBuildLocal;
 
     /// <summary>Build the service data client OFF the scenario's config file (service role).</summary>
     private Client ServiceClientFor(int id, bool shortTimeout = false)

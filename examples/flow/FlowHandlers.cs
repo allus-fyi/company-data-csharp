@@ -79,6 +79,20 @@ public sealed class FlowHandlers
     /// <summary>The canned INVALID value the validation-demo submits once for an email field.</summary>
     private const string InvalidEmail = "not-an-email";
 
+    // The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+    // scenario>`, appended AT the call site, in the order the calls were made. The annotations are
+    // byte-identical in all six SDK examples — only the method reference is written in the language's own
+    // idiom — so one scenario teaches one thing whichever example a reader starts. Keep them in step when
+    // this handler changes.
+    private const string CallServiceBuild = "Client.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase";
+    private const string CallIdentity = "Client.IdentityAsync — GET /api/company-data/whoami: this service's own company_user_id, which the COMPANY party binds to";
+    private const string CallConnection = "Client.ConnectionAsync — reads the configured connection; the connected person's id on it is what the CUSTOMER party binds to";
+    private const string CallTrigger = "Client.TriggerFlowRunAsync — starts a run of the published flow for that connection, pinning the flow's latest published version";
+    private const string CallFlowRun = "Client.FlowRunAsync — re-read on every poll to see whose turn the run is on";
+    private const string CallProcess = "Client.ProcessFlowRunAsync — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the document when the submit lands on a document-mode leaf";
+    private const string CallAnswers = "Client.FlowRunAnswers — the completed run's answers, decrypted with the service key";
+    private const string CallDocument = "Client.FlowRunDocumentAsync — downloads the company's own copy of the generated contract and decrypts it with the service key";
+
     private readonly Runtime _rt;
 
     public FlowHandlers(Runtime rt) => _rt = rt;
@@ -156,11 +170,12 @@ public sealed class FlowHandlers
         string flowRunId;
         try
         {
+            calls.Add(CallServiceBuild);
             var client = ServiceClient();
 
             // The COMPANY party binds to this service's own company_user_id (IdentityAsync).
+            calls.Add(CallIdentity);
             var identity = await client.IdentityAsync();
-            calls.Add("Client.IdentityAsync");
             var companyUserId = identity.CompanyUserId ?? "";
             if (companyUserId.Length == 0)
             {
@@ -169,8 +184,8 @@ public sealed class FlowHandlers
             }
 
             // The CUSTOMER party binds to the connected person's public personId (no public user_id).
+            calls.Add(CallConnection);
             var connection = await client.ConnectionAsync(connectionId);
-            calls.Add("Client.ConnectionAsync");
             var personId = connection.PersonId;
             if (string.IsNullOrEmpty(personId))
             {
@@ -187,8 +202,8 @@ public sealed class FlowHandlers
                 [PartyCompany] = companyUserId,
                 [PartyCustomer] = personId,
             };
+            calls.Add(CallTrigger);
             var flowRun = await client.TriggerFlowRunAsync(flowId, connectionId, bindings);
-            calls.Add("Client.TriggerFlowRunAsync");
 
             flowRunId = flowRun.Id ?? "";
             if (flowRunId.Length == 0)
@@ -251,9 +266,10 @@ public sealed class FlowHandlers
 
         try
         {
+            AddCall(run, CallServiceBuild);
             var client = ServiceClient();
+            AddCall(run, CallFlowRun);
             var flowRun = await client.FlowRunAsync(flowRunId);
-            AddCall(run, "Client.FlowRunAsync");
 
             var status = flowRun.Status ?? "";
             var companyParty = flowRun.CompanyPartyKey;
@@ -311,10 +327,10 @@ public sealed class FlowHandlers
             return fill;
         }
 
+        AddCall(run, CallProcess);
         try
         {
             await client.ProcessFlowRunAsync(flowRunId, FillNode);
-            AddCall(run, "Client.ProcessFlowRunAsync");
             // Advanced: every field filled for this node was accepted.
             foreach (var f in filled)
             {
@@ -328,7 +344,6 @@ public sealed class FlowHandlers
         {
             // The canned invalid value was rejected BEFORE submit — record it and mark the node so the
             // next poll submits the valid value. The node did NOT advance.
-            AddCall(run, "Client.ProcessFlowRunAsync");
             var submitted = InvalidEmail;
             foreach (var f in filled)
                 if (f.Slug == e.Slug) { submitted = f.Submitted; break; }
@@ -353,8 +368,8 @@ public sealed class FlowHandlers
     /// </summary>
     private async Task<Run> Complete(Run run, Client client, FlowRun flowRun, string flowRunId)
     {
+        AddCall(run, CallAnswers);
         var answers = client.FlowRunAnswers(flowRun);
-        AddCall(run, "Client.FlowRunAnswers");
         run.Answers = answers
             .Select(kv => new Dictionary<string, object?> { ["slug"] = kv.Key, ["value"] = kv.Value })
             .ToList();
@@ -363,8 +378,8 @@ public sealed class FlowHandlers
         {
             try
             {
+                AddCall(run, CallDocument);
                 var bytes = await client.FlowRunDocumentAsync(flowRunId);
-                AddCall(run, "Client.FlowRunDocumentAsync");
                 run.Document = new Dictionary<string, object?>
                 {
                     ["status"] = "downloaded", ["downloaded"] = true, ["bytes"] = bytes.Length,
@@ -445,9 +460,6 @@ public sealed class FlowHandlers
         _ => "Acme Corporation",
     };
 
-    /// <summary>Append a call name preserving first-occurrence order (a poll may repeat flowRun across polls).</summary>
-    private static void AddCall(Run run, string name)
-    {
-        if (!run.Calls.Contains(name)) run.Calls.Add(name);
-    }
+    /// <summary>Record a call on the run's trace — ONE implementation for all three families (§1).</summary>
+    private static void AddCall(Run run, string name) => Trace.Add(run.Calls, name);
 }

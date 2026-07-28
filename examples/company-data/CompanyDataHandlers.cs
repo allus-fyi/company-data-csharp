@@ -63,6 +63,22 @@ public sealed class CompanyDataHandlers
 
     private const string DefaultApiUrl = "https://api.allme.fyi";
 
+    // The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+    // scenario>`, appended AT the call site, in the order the calls were made; an entry wrapped in
+    // parentheses is a step that is deliberately NOT an SDK call. The annotations are byte-identical in
+    // all six SDK examples — only the method reference is written in the language's own idiom — so one
+    // scenario teaches one thing whichever example a reader starts. Keep them in step when this handler
+    // changes.
+    private const string CallServiceBuild = "Client.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase";
+    private const string CallConnections = "Client.ConnectionsAsync — pages GET /api/company-data/connections: loads your request-field catalog first for value typing, then decrypts each person's values with the service key";
+    private const string CallRequestFields = "Client.RequestFieldsAsync — GET /api/company-data/request-fields: your own request-field catalog, fetched once and cached for the life of the client";
+    private const string CallProcessChanges = "Client.ProcessChangesAsync — drains the change feed through the crash-safe pump: handler before ack, at-least-once (dedup on Change.id), failures to the local dead-letter store";
+    private const string CallCreateDocument = "Client.CreateDocumentAsync — {0}";
+    private const string CallWebhookStarted = "(webhook run started) — POST /webhook receives each delivery; every poll also drains the change feed as a fallback";
+    private const string CallVerifyWebhook = "Client.VerifyWebhook — checks the delivery's X-Allus-Signature HMAC against the secret configured for its X-Allus-Webhook-Id; a failure answers 401";
+    private const string CallParseWebhook = "Client.ParseWebhook — turns the verified body into a typed Change, decrypting its value with the service key";
+    private const string CallDrainBatch = "Client.DrainBatchAsync — the per-poll feed fallback: one unbuffered drain, so events still show up when no delivery can reach this machine";
+
     private readonly Runtime _rt;
 
     public CompanyDataHandlers(Runtime rt) => _rt = rt;
@@ -149,6 +165,7 @@ public sealed class CompanyDataHandlers
         var run = new Run { Scenario = id, Calls = calls };
         try
         {
+            calls.Add(CallServiceBuild);
             var client = Client.FromConfig(_rt.ConfigPathFor(id));
             run.Result = await doAsync(client, calls);
             run.Status = "done";
@@ -168,6 +185,7 @@ public sealed class CompanyDataHandlers
     /// </summary>
     private async Task<object> DoRead(Client client, List<string> calls)
     {
+        calls.Add(CallConnections);
         var connections = new List<object>();
         await foreach (var conn in client.ConnectionsAsync())
         {
@@ -190,7 +208,6 @@ public sealed class CompanyDataHandlers
                 values,
             });
         }
-        calls.Add("Client.ConnectionsAsync");
         return new { connections };
     }
 
@@ -200,6 +217,7 @@ public sealed class CompanyDataHandlers
     /// </summary>
     private async Task<object> DoDefinitions(Client client, List<string> calls)
     {
+        calls.Add(CallRequestFields);
         var fields = new List<object>();
         foreach (var f in await client.RequestFieldsAsync())
             fields.Add(new
@@ -210,7 +228,6 @@ public sealed class CompanyDataHandlers
                 mandatory = f.Mandatory,
                 one_time = f.OneTime,
             });
-        calls.Add("Client.RequestFieldsAsync");
         return new { fields };
     }
 
@@ -222,6 +239,7 @@ public sealed class CompanyDataHandlers
     /// </summary>
     private async Task<object> DoChanges(Client client, List<string> calls)
     {
+        calls.Add(CallProcessChanges);
         var events = new List<object?>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         await client.ProcessChangesAsync(change =>
@@ -233,7 +251,6 @@ public sealed class CompanyDataHandlers
             events.Add(ProjectChange(change, null));
             return Task.CompletedTask;
         });
-        calls.Add("Client.ProcessChangesAsync");
         return new { events, drained = true };
     }
 
@@ -297,10 +314,10 @@ public sealed class CompanyDataHandlers
             if (spec.PerPerson && shareCode.Length == 0)
                 throw new InvalidOperationException(
                     "this document type targets a connected person — set a target person share code in the setup, then re-run");
+            calls.Add(string.Format(CallCreateDocument, spec.Label));
             var doc = await spec.Create(spec.PerPerson ? shareCode : null);
             docs.Add(new { index = i + 1, label = spec.Label, document_id = doc.Id, status = doc.Status });
         }
-        calls.Add($"Client.CreateDocumentAsync ×{specs.Length}");
         return new { docs };
     }
 
@@ -328,7 +345,7 @@ public sealed class CompanyDataHandlers
             Unparseable = 0,
             Calls = new List<string>
             {
-                "(webhook run started — POST /webhook receives; each poll also DrainBatchAsync()s the feed)",
+                CallWebhookStarted,
             },
         };
         _rt.WriteRun(runId, run);
@@ -365,8 +382,9 @@ public sealed class CompanyDataHandlers
             return;
         }
 
+        RecordCall(run, CallServiceBuild);
         var client = Client.FromConfig(_rt.ConfigPathFor(Webhook));
-        RecordCall(run, "Client.VerifyWebhook");
+        RecordCall(run, CallVerifyWebhook);
         if (!client.VerifyWebhook(rawBody, headers))
         {
             // A genuine signature failure — persist the attempted verify so the calls trace stays truthful.
@@ -376,7 +394,7 @@ public sealed class CompanyDataHandlers
         }
         try
         {
-            RecordCall(run, "Client.ParseWebhook");
+            RecordCall(run, CallParseWebhook);
             var change = client.ParseWebhook(rawBody, headers);
             (run.Events ??= new()).Add(ProjectChange(change, "webhook"));
         }
@@ -444,10 +462,11 @@ public sealed class CompanyDataHandlers
         var seen = new HashSet<string>(run.SeenFeedIds ?? new List<string>(), StringComparer.Ordinal);
         try
         {
+            var buildNew = RecordCall(run, CallServiceBuild);
             var client = Client.FromConfig(_rt.ConfigPathFor(Webhook));
             // Every poll ATTEMPTS the feed pull — record the call now (deduped), so an empty poll still
             // reports the DrainBatchAsync it performed rather than claiming no call.
-            var drainNew = RecordCall(run, "Client.DrainBatchAsync");
+            var drainNew = RecordCall(run, CallDrainBatch);
             var appended = false;
             foreach (var change in await client.DrainBatchAsync())
             {
@@ -459,7 +478,7 @@ public sealed class CompanyDataHandlers
                 (run.Events ??= new()).Add(ProjectChange(change, "feed"));
                 appended = true;
             }
-            if (appended || drainNew) _rt.WriteRun(runId, run);
+            if (appended || drainNew || buildNew) _rt.WriteRun(runId, run);
         }
         catch (Exception)
         {
@@ -473,11 +492,7 @@ public sealed class CompanyDataHandlers
     /// was newly added (so the caller can persist on that transition).
     /// </summary>
     private static bool RecordCall(Run run, string name)
-    {
-        if (run.Calls.Contains(name)) return false;
-        run.Calls.Add(name);
-        return true;
-    }
+        => Trace.Add(run.Calls, name); // ONE implementation for all three families (standards §1)
 
     // ── Change projection ──────────────────────────────────────────────────────
 
