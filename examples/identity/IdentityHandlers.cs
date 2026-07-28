@@ -66,6 +66,16 @@ public sealed class IdentityHandlers
     private static readonly string DefaultAuthorizeBase = OAuthClient.DefaultAuthorizeUrl; // https://web.allme.fyi/auth
 
     /// <summary>
+    /// Refusal when the request carries no Host header, so the browser's origin is unknown (#574). There is
+    /// NO default host: substituting one (localhost) silently sends the round-trip to a DIFFERENT origin
+    /// than the browser is on — a different localStorage and a redirect URI the OAuth app never registered.
+    /// </summary>
+    private const string NoOrigin =
+        "no_origin — this request carried no Host header, so the OAuth redirect URI cannot be derived " +
+        "from the origin your browser is using. Open the example by its address (http://<host>:<port>/) " +
+        "and save the setup again.";
+
+    /// <summary>
     /// A short-timeout HTTP client for the short-cycled polls. The SDK's poll helpers bound their LOGICAL
     /// loop with timeout=2, but that alone does not bound the underlying HTTP request; a single-worker
     /// server must not be pinned by one blackholed poll, so poll clients get a ~2.5s transport.
@@ -85,6 +95,13 @@ public sealed class IdentityHandlers
     public async Task SaveConfig(HttpContext ctx, int id)
     {
         if (!IsRunnable(id)) { await Web.NotFound(ctx); return; }
+        // The redirect URI is derived from THIS request's origin and from nothing else (#574). Refuse
+        // rather than store a hostless URI: the suite renders this sentence on Save.
+        if (string.IsNullOrWhiteSpace(ctx.Request.Host.Value))
+        {
+            await Web.WriteJson(ctx, new { error = NoOrigin }, 400);
+            return;
+        }
         var body = await Web.ReadBody(ctx);
 
         // Canonical SDK config — the idw role for every OAuth scenario.
@@ -486,16 +503,31 @@ public sealed class IdentityHandlers
 
     // ── input / config plumbing ────────────────────────────────────────────────────
 
-    /// <summary>The registered redirect URI: http://{host}/callback (host = the serving origin).</summary>
-    private static string RedirectUri(HttpContext ctx) => $"http://{ctx.Request.Host.Value}/callback";
+    /// <summary>
+    /// The registered redirect URI: http://{host}/callback, host = the origin the browser actually used.
+    /// Never falls back to a hardcoded host (#574) — 127.0.0.1 and localhost are DIFFERENT origins for
+    /// redirect matching and for browser storage alike, so a substituted default drops the developer on an
+    /// origin whose localStorage never held the setup and whose URI the OAuth app never registered.
+    /// </summary>
+    private static string RedirectUri(HttpContext ctx)
+    {
+        var host = ctx.Request.Host.Value;
+        if (string.IsNullOrWhiteSpace(host)) throw new InvalidOperationException(NoOrigin);
+        return $"http://{host.Trim()}/callback";
+    }
 
-    /// <summary>The redirect URI recorded in the scenario's config file (used by the OIDC library).</summary>
+    /// <summary>
+    /// The redirect URI recorded in the scenario's config file (used by the OIDC library) — the SAME value
+    /// the authorize URL carried, so the two legs of the exchange cannot diverge. An absent/empty record
+    /// re-derives from THIS request's origin; it never substitutes a host (#574).
+    /// </summary>
     private string ConfigRedirectUri(int id, HttpContext ctx)
     {
         try
         {
             using var doc = JsonDocument.Parse(File.ReadAllText(_rt.ConfigPathFor(id.ToString())));
-            return Web.Str(doc.RootElement, "oauth_redirect_uri") ?? RedirectUri(ctx);
+            var stored = Web.Str(doc.RootElement, "oauth_redirect_uri");
+            return string.IsNullOrWhiteSpace(stored) ? RedirectUri(ctx) : stored;
         }
         catch (Exception) { return RedirectUri(ctx); }
     }
