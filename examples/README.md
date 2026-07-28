@@ -160,7 +160,8 @@ The scenario advanced inputs default to the **deployed AWS platform** (pre-launc
 cluster is the test environment): API url `https://api.allme.fyi`, identity authorize
 base `https://web.allme.fyi/auth`. Register the demo's OAuth apps, service, and data
 clients in the **allus portal at https://portal.allus.fyi**; each scenario's setup
-checklist names the exact portal pages. For the identity scenarios, register on
+checklist names the exact portal pages, and a table beneath it gives the intended value
+for every control on each of them — including the ones to leave alone. For the identity scenarios, register on
 every OAuth app you create the redirect URI matching the origin you open the portal
 on. The backend writes whichever origin your browser used into the scenario's
 config file, so the two must match: use **`http://localhost:8091/callback`** when you
@@ -224,7 +225,7 @@ The frontend ships as a checksummed release asset; the single pin lives in
 `frontend.lock`:
 
 ```json
-{ "tag": "v0.6.1", "sha256": "<sha256 of dist.tar.gz>" }
+{ "tag": "v0.6.2", "sha256": "<sha256 of dist.tar.gz>" }
 ```
 
 To move to a newer release: set `tag` + `sha256` in `frontend.lock`, remove the cached
