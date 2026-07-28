@@ -92,6 +92,22 @@ builder.Logging.ClearProviders(); // keep stdout to our own messages
 builder.WebHost.UseUrls($"http://*:{port}");
 var app = builder.Build();
 
+// Boundary guard (#583): an unhandled handler exception otherwise leaves ASP.NET Core to answer with a
+// bare 500 and NO body at all — measured `Content-Length: 0` — so the suite has no `error` to render and
+// falls back to printing the scenario number ("start failed (5)"), which reads like an error code and
+// names nothing. The other five backends all had such a guard; this one did not. It is the OUTERMOST
+// middleware so it also covers the gate below, and it answers only while the response can still be
+// written (a failure after the first byte is already on the wire is unrecoverable by anyone).
+app.Use(async (ctx, next) =>
+{
+    try { await next(); }
+    catch (Exception e)
+    {
+        if (ctx.Response.HasStarted) throw;
+        await Web.WriteFailure(ctx, Web.ReasonOf(e));
+    }
+});
+
 // Single-worker semantics (contract): serialize every request through one gate, and lazily sweep the
 // run TTL on each — so the file store stays lock-free exactly as the contract describes.
 var gate = new SemaphoreSlim(1, 1);

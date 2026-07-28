@@ -179,7 +179,7 @@ public sealed class FlowHandlers
             var companyUserId = identity.CompanyUserId ?? "";
             if (companyUserId.Length == 0)
             {
-                await Web.WriteJson(ctx, new { error = "identity_error", message = "IdentityAsync returned no company_user_id" }, 502);
+                await Web.WriteFailure(ctx, "IdentityAsync returned no company_user_id", "identity_error", 502);
                 return;
             }
 
@@ -189,11 +189,9 @@ public sealed class FlowHandlers
             var personId = connection.PersonId;
             if (string.IsNullOrEmpty(personId))
             {
-                await Web.WriteJson(ctx, new
-                {
-                    error = "connection_error",
-                    message = $"connection {connectionId} has no personId (not found or not connected)",
-                }, 502);
+                await Web.WriteFailure(
+                    ctx, $"connection {connectionId} has no personId (not found or not connected)",
+                    "connection_error", 502);
                 return;
             }
 
@@ -208,13 +206,13 @@ public sealed class FlowHandlers
             flowRunId = flowRun.Id ?? "";
             if (flowRunId.Length == 0)
             {
-                await Web.WriteJson(ctx, new { error = "trigger_error", message = "TriggerFlowRunAsync returned no run id" }, 502);
+                await Web.WriteFailure(ctx, "TriggerFlowRunAsync returned no run id", "trigger_error", 502);
                 return;
             }
         }
         catch (Exception e) when (e is ApiException or ConfigException)
         {
-            await Web.WriteJson(ctx, new { error = "start_failed", message = e.Message }, 502);
+            await Web.WriteFailure(ctx, Web.ReasonOf(e), "start_failed", 502);
             return;
         }
 
