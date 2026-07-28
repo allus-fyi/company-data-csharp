@@ -1,6 +1,7 @@
 using System.Formats.Tar;
 using System.IO.Compression;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -22,8 +23,9 @@ using Microsoft.Extensions.Logging;
 //      unpack to .frontend/<tag>/  (a present, verified bundle is a cache hit — nothing is re-fetched)
 //   3. assert the bundle's contract.json version == the backend's implemented contractVersion (3)
 //   4. refuse a busy port with a clear message
-//   5. serve http://localhost:${PORT:-8091} — one Kestrel host; a serializing gate keeps it single-worker
-//      (contract: no cross-request concurrency to guard).
+//   5. serve port ${PORT:-8091} on ALL interfaces — one Kestrel host; a serializing gate keeps it
+//      single-worker (contract: no cross-request concurrency to guard) — so a phone on the same network
+//      can reach it, printing every URL it is reachable on (#553).
 
 const int ContractVersion = Dispatcher.ContractVersion; // 3
 const string ReleaseBase = "https://github.com/allme-sdk/example-test-suite/releases/download";
@@ -71,9 +73,9 @@ if (bundleVersion != ContractVersion)
     Fail($"contract mismatch: bundle contractVersion={bundleVersion?.ToString() ?? "null"}, backend implements {ContractVersion}.\n"
        + "Bump the frontend.lock pin to a release whose contract.json matches, or update the backend.");
 
-// 4. port
+// 4. port — probe the SAME address the server binds (all interfaces), not just loopback
 var port = int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var p) ? p : 8091;
-try { var l = new TcpListener(IPAddress.Loopback, port); l.Start(); l.Stop(); }
+try { var l = new TcpListener(IPAddress.Any, port); l.Start(); l.Stop(); }
 catch (SocketException)
 {
     Fail($"port {port} is busy. Set PORT=<n> to use another port "
@@ -86,7 +88,8 @@ var dispatcher = new Dispatcher(rt, sdkVersion);
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders(); // keep stdout to our own messages
-builder.WebHost.UseUrls($"http://localhost:{port}");
+// ALL interfaces (Kestrel's "*" = any IP), so a phone on the same network can reach it (#553).
+builder.WebHost.UseUrls($"http://*:{port}");
 var app = builder.Build();
 
 // Single-worker semantics (contract): serialize every request through one gate, and lazily sweep the
@@ -136,10 +139,59 @@ app.MapFallback(async (HttpContext ctx) =>
     await ctx.Response.WriteAsync("bundle not found");
 });
 
-Console.Error.WriteLine($"serving http://localhost:{port}  (Ctrl-C to stop)");
+PrintReachableUrls(port);
 app.Run();
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+// Announce every URL the server is reachable on (#553).
+//
+// The server binds all interfaces, so a phone on the same network can reach it — but only if the
+// person holding the phone knows which address to type. Print the loopback URL AND every non-loopback
+// IPv4 address of this host, plus the plain warning that this is now open to the local network.
+static void PrintReachableUrls(int port)
+{
+    Console.Error.WriteLine($"serving on ALL interfaces, port {port}  (all three scenario families; Ctrl-C to stop)");
+    Console.Error.WriteLine($"  on this machine:  http://localhost:{port}");
+    var lan = LanAddresses();
+    if (lan.Count == 0)
+        Console.Error.WriteLine("  on this network:  (no non-loopback IPv4 address found — is this machine on a network?)");
+    else
+        for (var i = 0; i < lan.Count; i++)
+            Console.Error.WriteLine((i == 0 ? "  on this network:  " : "                    ") + $"http://{lan[i]}:{port}");
+    Console.Error.WriteLine("  NOTE: anyone on your network can now reach this demo, and its setup panels accept and");
+    Console.Error.WriteLine("        store real credentials under .runtime/config/ — OAuth and data-client secrets,");
+    Console.Error.WriteLine("        private-key PEMs and their passphrases, and webhook signing secrets. It is a local");
+    Console.Error.WriteLine("        developer example, not a hardened service: run it only on a network you trust, and");
+    Console.Error.WriteLine("        only with sandbox credentials.");
+}
+
+// Every non-loopback, non-link-local IPv4 address of this host (an IPv6 literal is not phone-typeable).
+static List<string> LanAddresses()
+{
+    var out_ = new List<string>();
+    try
+    {
+        foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (nic.OperationalStatus != OperationalStatus.Up
+                || nic.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+                continue;
+            foreach (var ua in nic.GetIPProperties().UnicastAddresses)
+            {
+                if (ua.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                var text = ua.Address.ToString();
+                if (text.StartsWith("127.") || text.StartsWith("169.254.")) continue;
+                if (!out_.Contains(text)) out_.Add(text);
+            }
+        }
+    }
+    catch (NetworkInformationException)
+    {
+        // no interface information available — the loopback URL above is still printed
+    }
+    return out_;
+}
 
 static string FindBaseDir()
 {

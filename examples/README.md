@@ -40,7 +40,8 @@ families on `http://localhost:8091`**. In detail it:
    bundle is a cache hit — nothing is re-fetched),
 3. checks the bundle's `contract.json` version against the backend's (**3**),
 4. refuses a busy port with a clear message, then
-5. serves `http://localhost:8091` — one Kestrel host. A serializing gate makes it
+5. serves port `8091` on **all interfaces** and prints every URL it is reachable on —
+   one Kestrel host. A serializing gate makes it
    effectively **single-worker** (the contract's "no cross-request concurrency to
    guard", so the file store stays lock-free).
 
@@ -52,6 +53,18 @@ panel shows the written path so you can open and read the real config; **Run**
 (**Trigger** for flow) then builds the SDK from that file (`OAuthClient.FromConfig` /
 `Client.FromConfig`) and runs off it. You never hand-create or edit the file — the
 backend writes it from your browser inputs; it is there to be read.
+
+**From a phone or another machine on the same network.** The server binds **all
+interfaces**, so any device on your network can reach it — startup prints the exact
+`http://<your-lan-ip>:8091` URL to type, alongside the localhost one. Open that URL on
+the phone and press **Save** there: the redirect URI written into the config file
+follows the origin you used, so register the same `http://<your-lan-ip>:8091/callback`
+on your OAuth app. Binding all interfaces also means **anyone on your network can reach
+this demo**, and its setup panels accept and store real credentials under
+`.runtime/config/` — OAuth and data-client secrets, private-key PEMs and their
+passphrases, and webhook signing secrets. It is a local developer example, not a
+hardened service: run it only on a network you trust, and only with sandbox
+credentials.
 
 **Port.** `8091` is the default, overridable with the `PORT` env var:
 
@@ -147,9 +160,13 @@ The scenario advanced inputs default to the **deployed AWS platform** (pre-launc
 cluster is the test environment): API url `https://api.allme.fyi`, identity authorize
 base `https://web.allme.fyi/auth`. Register the demo's OAuth apps, service, and data
 clients in the **allus portal at https://portal.allus.fyi**; each scenario's setup
-checklist names the exact portal pages. For the identity scenarios, register the
-redirect URI **`http://localhost:8091/callback`** on every OAuth app you create
-(adjust the port if you set `PORT`).
+checklist names the exact portal pages. For the identity scenarios, register on
+every OAuth app you create the redirect URI matching the origin you open the portal
+on. The backend writes whichever origin your browser used into the scenario's
+config file, so the two must match: use **`http://localhost:8091/callback`** when you
+browse from this machine and **`http://<your-lan-ip>:8091/callback`** when you drive
+the example from a phone (the startup output prints the exact address). Adjust the
+port if you set `PORT`.
 
 Running against a **local stack** instead is an optional secondary target: in the
 browser, switch the advanced inputs to the local URLs. No file in this example
