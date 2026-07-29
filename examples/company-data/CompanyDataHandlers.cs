@@ -38,7 +38,8 @@ public sealed class Run : IRun
 ///   changes     — Client.ProcessChangesAsync() → a crash-safe pump drain (idempotent on Change.Id)
 ///   webhook     — VerifyWebhook()+ParseWebhook() → a public POST /webhook receiver + a DrainBatchAsync()
 ///                                                  feed fallback; ONE accumulating run keyed by webhook id
-///   documents   — Client.CreateDocumentAsync() ×6 → the six document/contract types
+///   documents   — Client.CreateDocumentAsync() → the document/contract types selected in setup
+///               (six offered, all ticked by default)
 ///
 /// Settings flow: the browser POSTs a scenario's setup values to POST /api/scenarios/{id}/config, which
 /// writes them to a canonical SDK config FILE (.runtime/config/{sid}.json). /start builds the Client from
@@ -126,7 +127,13 @@ public sealed class CompanyDataHandlers
                 meta["webhook_id"] = webhookId; // the routing key /start writes into the route record
         }
         if (id == Documents)
+        {
             meta["share_code"] = Web.Str(body, "shareCode") ?? ""; // the per-person/contract target
+            // Preserve presence so DoDocuments can distinguish an explicit empty selection from
+            // an absent selection; absence means all document types.
+            if (Web.Has(body, "documentTypes"))
+                meta["document_types"] = Web.StrArray(body, "documentTypes");
+        }
 
         var configPath = _rt.WriteConfig(id, cfg);
         _rt.WriteConfigMeta(id, meta);
@@ -253,43 +260,47 @@ public sealed class CompanyDataHandlers
     }
 
     /// <summary>
-    /// companydata:documents — Client.CreateDocumentAsync() for each of the six document/contract types
-    /// (payloads pinned to the platform's fixed test fixtures for these document types). The
-    /// per-person / private / contract types target the connected person by share code (from the
-    /// setup sidecar).
+    /// companydata:documents — Client.CreateDocumentAsync() for each SELECTED document/contract type, of
+    /// the six the scenario offers (payloads pinned to the platform's fixed test fixtures for these
+    /// document types). The per-person / private / contract types target the connected person by share
+    /// code (from the setup sidecar). Selection comes from the sidecar's document_types list; absence
+    /// means all six.
     /// </summary>
     private async Task<object> DoDocuments(Client client, List<string> calls)
     {
-        var shareCode = Web.Str(_rt.ReadConfigMeta(Documents), "share_code") ?? "";
+        var meta = _rt.ReadConfigMeta(Documents);
+        var shareCode = Web.Str(meta, "share_code") ?? "";
+        var hasTypes = Web.Has(meta, "document_types");
+        var selectedTypes = Web.StrArray(meta, "document_types");
 
-        // (label, perPerson, factory) — the factory builds the exact CreateDocumentAsync call. A perPerson
-        // spec has its share_code applied inside DoDocuments so the "target a connected person" rule is
-        // visible in one place.
-        var specs = new (string Label, bool PerPerson, Func<string?, Task<Document>> Create)[]
+        // (key, label, perPerson, factory) — the factory builds the exact CreateDocumentAsync call. A
+        // perPerson spec has its share_code applied inside DoDocuments so the "target a connected person"
+        // rule is visible in one place.
+        var specs = new (string Key, string Label, bool PerPerson, Func<string?, Task<Document>> Create)[]
         {
-            ("Broadcast plaintext JSON (no target)", false, _ => client.CreateDocumentAsync(
+            ("broadcast_json", "Broadcast plaintext JSON (no target)", false, _ => client.CreateDocumentAsync(
                 name: "Service notice", payloadKind: "json",
                 jsonValue: new Dictionary<string, object?> { ["msg"] = "Scheduled maintenance Sunday" })),
 
-            ("Broadcast PDF file (no target)", false, _ => client.CreateDocumentAsync(
+            ("broadcast_pdf", "Broadcast PDF file (no target)", false, _ => client.CreateDocumentAsync(
                 name: "Price list", payloadKind: "file",
                 fileBytes: MinimalPdf("Price list"), fileMime: "application/pdf")),
 
-            ("Per-person NON-private file", true, sc => client.CreateDocumentAsync(
+            ("per_person_file", "Per-person NON-private file", true, sc => client.CreateDocumentAsync(
                 name: "Your invoice", payloadKind: "file", shareCode: sc,
                 fileBytes: MinimalPdf("Your invoice"), fileMime: "application/pdf")),
 
-            ("Per-person PRIVATE file (lock → reveal)", true, sc => client.CreateDocumentAsync(
+            ("per_person_private", "Per-person PRIVATE file (lock → reveal)", true, sc => client.CreateDocumentAsync(
                 name: "Confidential report", payloadKind: "file", isPrivate: true, shareCode: sc,
                 fileBytes: MinimalPdf("Confidential report"), fileMime: "application/pdf")),
 
-            ("CONTRACT requiring SIGNATURE", true, sc => client.CreateDocumentAsync(
+            ("contract_signature", "CONTRACT requiring SIGNATURE", true, sc => client.CreateDocumentAsync(
                 name: "Service agreement", kind: "agreement", payloadKind: "file", shareCode: sc,
                 requiresSignature: true,
                 fileBytes: MinimalPdf("Service agreement"), fileMime: "application/pdf",
                 metadata: new Dictionary<string, object?> { ["can_be_cancelled_in_app"] = true })),
 
-            ("CONTRACT requiring ACCEPTANCE", true, sc => client.CreateDocumentAsync(
+            ("contract_acceptance", "CONTRACT requiring ACCEPTANCE", true, sc => client.CreateDocumentAsync(
                 name: "Terms update", kind: "agreement", payloadKind: "json", shareCode: sc,
                 requiresAcceptance: true,
                 jsonValue: new Dictionary<string, object?> { ["version"] = "2.0" },
@@ -307,15 +318,16 @@ public sealed class CompanyDataHandlers
         };
 
         var docs = new List<object>();
-        for (var i = 0; i < specs.Length; i++)
+        foreach (var spec in specs)
         {
-            var spec = specs[i];
+            if (hasTypes && !selectedTypes.Contains(spec.Key))
+                continue; // deselected in setup — the scenario runs exactly what was chosen
             if (spec.PerPerson && shareCode.Length == 0)
                 throw new InvalidOperationException(
                     "this document type targets a connected person — set a target person share code in the setup, then re-run");
             calls.Add(string.Format(CallCreateDocument, spec.Label));
             var doc = await spec.Create(spec.PerPerson ? shareCode : null);
-            docs.Add(new { index = i + 1, label = spec.Label, document_id = doc.Id, status = doc.Status });
+            docs.Add(new { index = docs.Count + 1, label = spec.Label, document_id = doc.Id, status = doc.Status });
         }
         return new { docs };
     }

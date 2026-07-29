@@ -110,4 +110,25 @@ public static class Web
         obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String
             ? p.GetString()
             : null;
+
+    /// <summary>Whether a JSON object carries the named property at all (present-but-empty still counts) —
+    /// used to tell an explicit "nothing selected" apart from a property nobody sent.</summary>
+    public static bool Has(JsonElement obj, string name) =>
+        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(name, out _);
+
+    /// <summary>Read a string-array property from a JSON object; absent/non-array/non-string elements are
+    /// skipped rather than thrown on, so a malformed entry degrades to "not selected" instead of a 500.</summary>
+    public static List<string> StrArray(JsonElement obj, string name)
+    {
+        var list = new List<string>();
+        if (obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in p.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.String)
+                    list.Add(item.GetString() ?? "");
+            }
+        }
+        return list;
+    }
 }

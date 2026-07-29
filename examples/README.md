@@ -154,7 +154,7 @@ waits. The demo ships two importable flow packages in **`flow/fixtures/`**:
 | **Request-field definitions** | `Client.RequestFieldsAsync()` | your request slugs → label / type / the folded `mandatory` flag + `one_time` |
 | **Change-feed pump** | `Client.ProcessChangesAsync()` | a crash-safe drain of the change feed (idempotent per event on `Change.Id`) |
 | **Webhook receiver** | `VerifyWebhook()` + `ParseWebhook()` | a public `POST /webhook` (401 on a bad HMAC, 200 otherwise) **plus** a change-feed fallback so it works with no tunnel |
-| **Create the six document types** | `Client.CreateDocumentAsync()` | broadcast JSON / broadcast PDF / per-person file / private file / contract-requiring-signature / contract-requiring-acceptance |
+| **Create document types** | `Client.CreateDocumentAsync()` | pick which to create — broadcast JSON / broadcast PDF / per-person file / private file / contract-requiring-signature / contract-requiring-acceptance, all ticked by default |
 
 The handlers live in **`company-data/CompanyDataHandlers.cs`**. Every company-data
 scenario uses the **service role**, so the service PEM + passphrase are a required
