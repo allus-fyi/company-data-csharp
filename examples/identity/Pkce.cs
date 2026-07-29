@@ -7,7 +7,7 @@ namespace Allus.ExampleTestSuite.Identity;
 /// PKCE (RFC 7636) verifier + S256 challenge. Pure local crypto — no network, no platform HTTP.
 /// The SDK takes the code_challenge into <see cref="Allus.CompanyData.OAuthClient.AuthorizeUrl"/> and
 /// the code_verifier into <see cref="Allus.CompanyData.OAuthClient.CompleteSignInAsync"/>; the demo
-/// generates the pair for the "Sign in with allme" scenarios (1–4). The OIDC scenarios (5/6) let the
+/// generates the pair for the "Sign in with allme" scenarios (1–4). The OIDC scenario (5) lets the
 /// OIDC library own PKCE instead.
 /// </summary>
 public static class Pkce

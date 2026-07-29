@@ -6,7 +6,7 @@
     ONE project that hosts a thin localhost backend implementing the demo-backend
     contract (contractVersion 3) for ALL THREE scenario families in one server on
     one port:
-      identity/     — sign in / OIDC / 2FA          (scenarios 1–8)
+      identity/     — sign in / OIDC / 2FA          (scenarios 1–5, 7–8)
       flow/         — run a contract flow            (flow:run)
       company-data/ — connections / fields / changes / webhooks / documents
                                                       (the five companydata:*)
@@ -18,13 +18,13 @@
     In a repository checkout it references the SDK by PROJECT reference (../src) so a
     reader sees which SDK call implements each scenario; from an extracted package it
     falls back to a PackageReference (see the ItemGroup below). It is not a separately
-    published package: it is a separate project and is not in the SDK solution — but
-    since #493 its SOURCE ships inside the Allus.CompanyData nupkg (at examples/), so an
-    installing developer does get it. IsPackable=false keeps it from being published as
-    its own package.
+    published package: it is a separate project and is not in the SDK solution. Its
+    SOURCE ships inside the Allus.CompanyData nupkg (at examples/), so an installing
+    developer does get it. IsPackable=false keeps it from being published as its own
+    package.
 
-    The OIDC scenarios (5/6) use the standard third-party IdentityModel.OidcClient —
-    that a real OIDC client drives them is the point of the #314 demonstration.
+    The OIDC scenario (5) uses the standard third-party IdentityModel.OidcClient —
+    a real OIDC client, not the allme SDK, drives it.
   -->
 
   <PropertyGroup>
@@ -55,7 +55,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Standard .NET OIDC client for identity scenarios 5/6 (discovery + PKCE + id_token
+    <!-- Standard .NET OIDC client for the identity OIDC scenario (5) (discovery + PKCE + id_token
          verification; client_secret_post; issuer/endpoint override for local stacks). -->
     <PackageReference Include="IdentityModel.OidcClient" Version="6.0.0" />
   </ItemGroup>

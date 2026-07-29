@@ -22,7 +22,7 @@ public sealed class Run : IRun
     // Sign-in scenarios (1–4): the PKCE verifier that pairs with the challenge in the authorize URL.
     public string? Verifier { get; set; }
 
-    // OIDC scenarios (5/6): the redirect the OIDC library needs to complete the exchange (state + PKCE
+    // OIDC scenario (5): the redirect the OIDC library needs to complete the exchange (state + PKCE
     // verifier ride the fields above; the OIDC library owns nonce handling internally).
     public string? RedirectUri { get; set; }
 
@@ -39,8 +39,8 @@ public sealed class Run : IRun
 }
 
 /// <summary>
-/// The identity family's scenario handlers (contract v3, identity scenarios 1–8). HTTP dispatch → handler
-/// → the SDK's intended top-level surface (or the OIDC library for scenarios 5/6). Handlers NEVER perform
+/// The identity family's scenario handlers (contract v3, identity scenarios 1–5, 7–8). HTTP dispatch → handler
+/// → the SDK's intended top-level surface (or the OIDC library for scenario 5). Handlers NEVER perform
 /// raw platform HTTP and NEVER block on the SDK's long defaults — detached / challenge waits are
 /// short-cycled (timeout=2) inside GET /api/runs.
 ///
@@ -56,7 +56,7 @@ public sealed class IdentityHandlers
     private static readonly IReadOnlyDictionary<int, string> Scenarios = new Dictionary<int, string>
     {
         [1] = "runnable", [2] = "runnable", [3] = "runnable", [4] = "runnable",
-        [5] = "runnable", [6] = "runnable", [7] = "guide", [8] = "runnable",
+        [5] = "runnable", [7] = "guide", [8] = "runnable",
     };
 
     private static readonly HashSet<int> ServiceScenarios = new() { 4, 8 };   // also read live via the data Client
@@ -66,7 +66,7 @@ public sealed class IdentityHandlers
     /// Scenarios whose CompleteSignInAsync response can carry claim values (userinfo "values" non-empty)
     /// and therefore need the OAuth app private key configured to decrypt them: mode one_time and mode
     /// connect, both delivered as app-key ciphertext through userinfo. Mode signin (scenarios 1, 2) never
-    /// carries values; scenario 8 never calls this leg at all; scenarios 5/6 run the OIDC library instead
+    /// carries values; scenario 8 never calls this leg at all; scenario 5 runs the OIDC library instead
     /// of this SDK's decrypt path.
     /// </summary>
     private static readonly HashSet<int> ClaimValueScenarios = new() { 3, 4 };
@@ -239,7 +239,6 @@ public sealed class IdentityHandlers
             }
 
             case 5: // OIDC login
-            case 6: // OIDC — continue on your phone
             {
                 // The OIDC library owns PKCE + state + nonce (the point of this scenario). Its
                 // generated `state` IS the runId, so /callback finds the run by it (contract: state == runId).
@@ -327,7 +326,7 @@ public sealed class IdentityHandlers
             }
             else if (ctx.Request.Query["code"].ToString() is { Length: > 0 } code)
             {
-                run = id is 5 or 6 ? await CompleteOidc(run, ctx) : await CompleteSignin(run, code);
+                run = id is 5 ? await CompleteOidc(run, ctx) : await CompleteSignin(run, code);
             }
             else
             {
@@ -474,7 +473,7 @@ public sealed class IdentityHandlers
         return run;
     }
 
-    /// <summary>Complete an OIDC sign-in (scenarios 5/6) via the OIDC library — id_token verified.</summary>
+    /// <summary>Complete an OIDC sign-in (scenario 5) via the OIDC library — id_token verified.</summary>
     private async Task<Run> CompleteOidc(Run run, HttpContext ctx)
     {
         var oidc = OidcClientFor(run.Scenario);

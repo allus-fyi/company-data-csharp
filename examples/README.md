@@ -4,7 +4,7 @@ A runnable website that demonstrates the allus / allme platform through the
 `Allus.CompanyData` **C# / .NET SDK**, covering **all three scenario families** from
 one server:
 
-- **identity** — Sign in with allme, OIDC login, and 2FA by allme (scenarios 1–8);
+- **identity** — Sign in with allme, OIDC login, and 2FA by allme (scenarios 1–5, 7–8);
 - **flow** — run a contract flow end-to-end (`flow:run`);
 - **company-data** — connections, request-field definitions, the change feed,
   webhooks, and documents (the five `companydata:*`).
@@ -15,10 +15,10 @@ directory is the thin .NET backend that implements the
 (**contractVersion 3**). Everything the handlers do goes through the SDK's
 **intended top-level surface** — `OAuthClient`, `Client`, `Client.TwoFactor`, the
 flow surface, `VerifyWebhook()` / `ParseWebhook()`, `CreateDocumentAsync()` — never
-internals, never raw platform HTTP. The identity OIDC scenarios (5/6) additionally
-use the standard third-party
+internals, never raw platform HTTP. The identity OIDC scenario (5) additionally
+uses the standard third-party
 [`IdentityModel.OidcClient`](https://www.nuget.org/packages/IdentityModel.OidcClient)
-library — that a real OIDC client drives them is the point of the demonstration.
+library — that a real OIDC client drives it is the point of the demonstration.
 
 ---
 
@@ -105,7 +105,7 @@ an extracted package (where `src/` does not exist).
 
 ## Which SDK call implements each scenario
 
-### identity (scenarios 1–8)
+### identity (scenarios 1–5, 7–8)
 
 | # | Scenario | SDK / OIDC calls the handler makes |
 |---|---|---|
@@ -114,12 +114,11 @@ an extracted package (where `src/` does not exist).
 | 3 | One-time claims | `OAuthClient.AuthorizeUrl("one_time", claims, …)` → `OAuthClient.CompleteSignInAsync` (decrypts values with the app private key from config) |
 | 4 | Connect (stay-connected) | `OAuthClient.AuthorizeUrl("connect", …)` → `CompleteSignInAsync`, then `Client.ConnectionsAsync` matched by `share_code` for LIVE values |
 | 5 | OIDC login | `(oidc) OidcClient.PrepareLoginAsync` → `/callback` → `(oidc) OidcClient.ProcessResponseAsync` (id_token verified) |
-| 6 | OIDC — continue on phone | same OIDC calls; completion via the phone (redirect leg) |
 | 7 | 2FA at consent — GUIDE card | none — a checklist + links to scenarios 1 & 5 (no `/start`) |
 | 8 | Standalone service-2FA + enrollment | `Client.TwoFactor.ChallengeAsync` → `TwoFactorClient.WaitForResultAsync` (2s); `/enroll` runs `OAuthClient.AuthorizeUrl("2fa_enroll", …)` in redirect & detached legs |
 
 The handlers live in **`identity/IdentityHandlers.cs`** (`identity/Pkce.cs` generates
-the PKCE pair for scenarios 1–4). The OIDC library (scenarios 5/6) owns PKCE, `state`,
+the PKCE pair for scenarios 1–4). The OIDC library (scenario 5) owns PKCE, `state`,
 and id_token verification; its generated `state` **is** the run id, so `/callback`
 finds the run by it.
 
