@@ -366,8 +366,14 @@ public sealed class FlowHandlers
     {
         AddCall(run, CallAnswers);
         var answers = client.FlowRunAnswers(flowRun);
+        var ciphers = OwnCipherBySlug(flowRun);
         run.Answers = answers
-            .Select(kv => new Dictionary<string, object?> { ["slug"] = kv.Key, ["value"] = kv.Value })
+            .Select(kv => new Dictionary<string, object?>
+            {
+                ["slug"] = kv.Key,
+                ["value"] = kv.Value,
+                ["cipher"] = ciphers.GetValueOrDefault(kv.Key),
+            })
             .ToList();
 
         if (flowRun.OutputMode == "document")
@@ -394,6 +400,27 @@ public sealed class FlowHandlers
         run.Status = "completed";
         run.Completed = true;
         return run;
+    }
+
+    /// <summary>
+    /// The company's own answer rows, keyed by slug and left as the still-encrypted wrapper the
+    /// API returned — the evidence the "Decrypted answers" panel pairs against each cleartext
+    /// value, so a reader can see the decrypt actually ran on real ciphertext rather than take it
+    /// on faith.
+    /// </summary>
+    private static Dictionary<string, object?> OwnCipherBySlug(FlowRun flowRun)
+    {
+        var serviceUid = flowRun.ServiceUserId;
+        var ciphers = new Dictionary<string, object?>();
+        foreach (var row in flowRun.Answers)
+        {
+            var slug = row.Get("slug").AsString();
+            if (!string.IsNullOrEmpty(slug) && row.Get("for_user_id").AsString() == serviceUid)
+            {
+                ciphers[slug] = row.Get("value").ToObjectGraph();
+            }
+        }
+        return ciphers;
     }
 
     /// <summary>
