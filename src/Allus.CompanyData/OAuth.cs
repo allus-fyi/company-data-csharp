@@ -165,9 +165,9 @@ public sealed class OAuthClient
             // left to the API, so the integration error surfaces at the call that made it.
             var name = (c.Name ?? string.Empty).Trim();
             if (name.Length == 0)
-                throw new ConfigException("every claim must carry a `Name` (#498)");
+                throw new ConfigException("every claim must carry a `Name`");
             if (!seen.Add(name))
-                throw new ConfigException($"duplicate claim name '{name}' (#498)");
+                throw new ConfigException($"duplicate claim name '{name}'");
             var entry = new Dictionary<string, object> { ["name"] = name, ["type"] = c.Type };
             if (!string.IsNullOrEmpty(c.Suggest)) entry["suggest"] = c.Suggest;
             if (c.Required) entry["required"] = true;
