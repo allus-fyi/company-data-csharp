@@ -62,6 +62,15 @@ public sealed class IdentityHandlers
     private static readonly HashSet<int> ServiceScenarios = new() { 4, 8 };   // also read live via the data Client
     private static readonly HashSet<int> OAuthUrlScenarios = new() { 1, 2, 3, 4, 8 }; // build a consent URL
 
+    /// <summary>
+    /// Scenarios whose CompleteSignInAsync response can carry claim values (userinfo "values" non-empty)
+    /// and therefore need the OAuth app private key configured to decrypt them: mode one_time and mode
+    /// connect, both delivered as app-key ciphertext through userinfo. Mode signin (scenarios 1, 2) never
+    /// carries values; scenario 8 never calls this leg at all; scenarios 5/6 run the OIDC library instead
+    /// of this SDK's decrypt path.
+    /// </summary>
+    private static readonly HashSet<int> ClaimValueScenarios = new() { 3, 4 };
+
     private const string DefaultApiUrl = "https://api.allme.fyi";
     private static readonly string DefaultAuthorizeBase = OAuthClient.DefaultAuthorizeUrl; // https://web.allme.fyi/auth
 
@@ -82,7 +91,7 @@ public sealed class IdentityHandlers
     private const string CallPollEnroll = "OAuthClient.PollResultAsync — polls POST /oauth2/result until the phone delivers {enrolled: true} (one 2s-bounded call per browser poll)";
     private const string CallCompleteSignin = "OAuthClient.CompleteSignInAsync — exchanges the code + PKCE verifier at POST /oauth2/token, then reads GET /api/oauth/userinfo; mode signin returns the identity only, no claim values";
     private const string CallCompleteOneTime = "OAuthClient.CompleteSignInAsync — exchanges the code + PKCE verifier at POST /oauth2/token, reads GET /api/oauth/userinfo, and decrypts every claim value with the OAuth app private key";
-    private const string CallCompleteConnect = "OAuthClient.CompleteSignInAsync — exchanges the code + PKCE verifier at POST /oauth2/token, then reads GET /api/oauth/userinfo; connect delivers no values here, the live ones come from the data client below";
+    private const string CallCompleteConnect = "OAuthClient.CompleteSignInAsync — exchanges the code + PKCE verifier at POST /oauth2/token, reads GET /api/oauth/userinfo, and decrypts the consented claim values with the OAuth app private key; the connection's live values still come separately from the data client below";
     private const string CallEnrolledCallback = "(callback ?enrolled=true) — the redirect-leg enrollment outcome; there is nothing to exchange, so no further SDK call";
     private const string CallServiceBuild = "Client.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase";
     private const string CallConnectionsLive = "Client.ConnectionsAsync — pages GET /api/company-data/connections and decrypts each person's values with the service key; the run keeps the one whose share code just signed in";
@@ -147,8 +156,9 @@ public sealed class IdentityHandlers
         if (Web.Str(body, "oauthClientSecret") is { Length: > 0 } secret)
             cfg["oauth_client_secret"] = secret;
 
-        // Scenario 3 (one_time): the OAuth app private key decrypts the claim values (config-only keys).
-        if (id == 3)
+        // Any scenario whose run can carry claim values (ClaimValueScenarios) needs the OAuth app
+        // private key to decrypt them (config-only keys).
+        if (ClaimValueScenarios.Contains(id))
         {
             if (Web.Str(body, "oauthPrivateKeyPem") is { Length: > 0 } pem)
                 cfg["oauth_private_key"] = _rt.MaterializeConfigKey(pem);
