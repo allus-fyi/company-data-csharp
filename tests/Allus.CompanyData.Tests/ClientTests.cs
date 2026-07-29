@@ -204,6 +204,102 @@ public sealed class ClientTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// #590 — the SAME slot URL serves raw file bytes when the person's source field is NOT private.
+    /// The handle must return the file either way, without the caller knowing which shape arrived, and
+    /// must not try to decrypt bytes that were never encrypted.
+    /// </summary>
+    [Fact]
+    public async Task BinaryHandleServesPlaintextBytes()
+    {
+        var page = new
+        {
+            total = 1,
+            items = new object[]
+            {
+                new
+                {
+                    connection_id = "csc-1", user_id = "person-1", display_name = "Anna",
+                    values = new Dictionary<string, object>
+                    {
+                        ["logo"] = new { value_url = "https://api.allme.fyi/api/company-data/connections/csc-1/slots/sf-9/file", live = true },
+                    },
+                },
+            },
+        };
+        var bytes = new byte[] { 0xff, 0xd8, 0xff, 0xe0 }.Concat(
+            System.Text.Encoding.ASCII.GetBytes("not-really-a-jpeg")).ToArray();
+        var (client, _) = Make((url, q) =>
+        {
+            if (url.EndsWith("/request-fields")) return Resp.Json(200, RequestFieldsBody);
+            if (url.EndsWith("/connections")) return Resp.Json(200, page);
+            if (url.EndsWith("/slots/sf-9/file"))
+                return Resp.Bytes(200, bytes, new Dictionary<string, string>
+                {
+                    ["Content-Type"] = "image/jpeg",
+                    ["X-Allus-Content-Sha256"] = Sha256Hex(bytes),
+                });
+            throw new Xunit.Sdk.XunitException("unexpected GET " + url);
+        });
+        using (client)
+        {
+            var conns = new List<Connection>();
+            await foreach (var c in client.ConnectionsAsync()) conns.Add(c);
+            var handle = Assert.IsType<BinaryHandle>(conns[0].Values["logo"].ValueObj);
+
+            Assert.Equal(bytes, await handle.BytesAsync());
+            Assert.Equal("image/jpeg", handle.ContentType);
+            Assert.Equal(Sha256Hex(bytes), handle.ContentSha256);
+        }
+    }
+
+    /// <summary>
+    /// #590 — a 410 file_expired surfaces the digest and the expiry date through ApiException.Details.
+    /// </summary>
+    [Fact]
+    public async Task BinaryHandleExpiredAnswerCarriesDigest()
+    {
+        var page = new
+        {
+            total = 1,
+            items = new object[]
+            {
+                new
+                {
+                    connection_id = "csc-1", user_id = "person-1", display_name = "Anna",
+                    values = new Dictionary<string, object>
+                    {
+                        ["logo"] = new { value_url = "https://api.allme.fyi/api/company-data/connections/csc-1/slots/sf-9/file", live = false },
+                    },
+                },
+            },
+        };
+        var (client, _) = Make((url, q) =>
+        {
+            if (url.EndsWith("/request-fields")) return Resp.Json(200, RequestFieldsBody);
+            if (url.EndsWith("/connections")) return Resp.Json(200, page);
+            return Resp.Json(410, new
+            {
+                error = "This file has expired",
+                error_key = "company_data.file_expired",
+                content_sha256 = "abc123",
+                expired_at = "2026-07-01T00:00:00Z",
+            });
+        });
+        using (client)
+        {
+            var conns = new List<Connection>();
+            await foreach (var c in client.ConnectionsAsync()) conns.Add(c);
+            var handle = Assert.IsType<BinaryHandle>(conns[0].Values["logo"].ValueObj);
+
+            var ex = await Assert.ThrowsAsync<ApiException>(() => handle.BytesAsync());
+            Assert.Equal(410, ex.Status);
+            Assert.Equal("company_data.file_expired", ex.ErrorKey);
+            Assert.Equal("abc123", ex.Details["content_sha256"]);
+            Assert.Equal("2026-07-01T00:00:00Z", ex.Details["expired_at"]);
+        }
+    }
+
     // ── connection(id) ─────────────────────────────────────────────────────────────────────────
 
     [Fact]

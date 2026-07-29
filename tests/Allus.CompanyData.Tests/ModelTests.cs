@@ -127,7 +127,17 @@ public class ModelTests
     {
         using var key = Vector.PrivateKey();
         string? capturedUrl = null;
-        BinaryFetch fetch = (url, ct) => { capturedUrl = url; return Task.FromResult<object>(Vector.BinaryWrapperNode); };
+        // #590: the fetch callback classifies the response. Here it reports the ENCRYPTED shape —
+        // what the route serves when the person's source field is private.
+        BinaryFetch fetch = (url, ct) =>
+        {
+            capturedUrl = url;
+            return Task.FromResult(new BinaryFetchResult(
+                Encrypted: true,
+                Wrapper: Vector.BinaryWrapperNode,
+                ContentType: "application/json",
+                ContentSha256: "deadbeef"));
+        };
 
         var detail = Obj(new()
         {
@@ -228,7 +238,8 @@ public class ModelTests
                 }),
             }),
         });
-        BinaryFetch fetch = (url, ct) => Task.FromResult<object>(Vector.BinaryWrapperNode);
+        BinaryFetch fetch = (url, ct) =>
+            Task.FromResult(new BinaryFetchResult(Encrypted: true, Wrapper: Vector.BinaryWrapperNode));
         var chg = Change.ListFromApi(body, _ => "photo", DecryptWith(key), fetch)[0];
         var handle = Assert.IsType<BinaryHandle>(chg.ValueObj);
         Assert.Equal(Vector.InnerFullSha256, Sha256Hex(await handle.BytesAsync()));

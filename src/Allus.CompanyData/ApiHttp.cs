@@ -81,7 +81,7 @@ public sealed class ApiHttp
 
         if (resp.StatusCode < 200 || resp.StatusCode >= 300)
         {
-            var (errorKey, message) = ExtractError(resp);
+            var (errorKey, message, _) = ExtractError(resp);
             throw new AuthException(
                 $"token request rejected (HTTP {resp.StatusCode})"
                 + (errorKey is not null ? $" [{errorKey}]" : "")
@@ -179,6 +179,29 @@ public sealed class ApiHttp
     }
 
     /// <summary>
+    /// GET <paramref name="path"/> returning the whole 2xx <see cref="HttpResult"/> — status, headers
+    /// AND raw body, with no parse.
+    /// <para>#590: the company-facing binary file endpoints have two 200 shapes (a JSON wrapper for an
+    /// encrypted answer, raw file bytes for a plaintext one) that are told apart by
+    /// <c>Content-Type</c>, and both carry an <c>X-Allus-Content-Sha256</c> digest header. Neither
+    /// <see cref="GetAsync"/> (which parses) nor <see cref="GetRawAsync"/> (which drops the headers)
+    /// can express that, so this hands the caller the response itself. Auth/refresh/retry and error
+    /// mapping are identical.</para>
+    /// </summary>
+    public Task<HttpResult> GetResponseAsync(
+        string path,
+        IReadOnlyDictionary<string, string>? query = null,
+        CancellationToken ct = default)
+        => RequestCoreAsync("GET", path, query: query, ct: ct);
+
+    /// <summary>
+    /// Parse a 2xx body the way <see cref="GetAsync"/> would have — for a caller that took the whole
+    /// response via <see cref="GetResponseAsync"/> and decided, after looking at the headers, that the
+    /// body is structured after all. Keeps the JSON/XML choice in ONE place.
+    /// </summary>
+    internal Node ParseResponse(HttpResult resp) => ParseBody(resp, _config.Format == "xml");
+
+    /// <summary>
     /// GET/POST/PUT/DELETE → a parsed <see cref="Node"/>. Thin wrapper over
     /// <see cref="RequestCoreAsync"/> that additionally parses the successful body as JSON/XML.
     /// </summary>
@@ -268,7 +291,7 @@ public sealed class ApiHttp
                     await BearerAsync(forceRefresh: true, ct).ConfigureAwait(false);
                     continue;
                 }
-                var (errorKey, message) = ExtractError(resp);
+                var (errorKey, message, _) = ExtractError(resp);
                 throw new AuthException(
                     "unauthorized after token refresh"
                     + (errorKey is not null ? $" [{errorKey}]" : "")
@@ -277,7 +300,7 @@ public sealed class ApiHttp
 
             if (status == 429)
             {
-                var (errorKey, message) = ExtractError(resp);
+                var (errorKey, message, _) = ExtractError(resp);
                 // #481: a pending-cap 429 means the caller already holds the maximum concurrent 2FA
                 // challenges — a retry can never clear that, so surface it immediately as an
                 // ApiException instead of the blind Retry-After backoff every other 429 gets.
@@ -293,8 +316,8 @@ public sealed class ApiHttp
                 throw new RateLimitException(retryAfter, errorKey, message);
             }
 
-            var (ek, msg) = ExtractError(resp);
-            throw new ApiException(status, ek, msg);
+            var (ek, msg, details) = ExtractError(resp);
+            throw new ApiException(status, ek, msg, details);
         }
     }
 
@@ -324,11 +347,20 @@ public sealed class ApiHttp
 
     // ── helpers ────────────────────────────────────────────────────────────────────────────────
 
-    private static (string? ErrorKey, string? Message) ExtractError(HttpResult resp)
+    private static readonly IReadOnlyDictionary<string, object?> NoDetails =
+        new Dictionary<string, object?>();
+
+    /// <summary>
+    /// Pull <c>error_key</c> + a message out of a non-2xx body (JSON or XML). #590: everything BESIDE
+    /// the key and the message travels on as <c>Details</c>, so a body that carries actionable data (a
+    /// 410 <c>file_expired</c>'s <c>content_sha256</c> + <c>expired_at</c>) is readable without a
+    /// bespoke exception type per response.
+    /// </summary>
+    private static (string? ErrorKey, string? Message, IReadOnlyDictionary<string, object?> Details) ExtractError(HttpResult resp)
     {
         var text = resp.Body;
         if (string.IsNullOrWhiteSpace(text))
-            return (null, null);
+            return (null, null, NoDetails);
 
         Node body;
         var trimmed = text.TrimStart();
@@ -338,17 +370,19 @@ public sealed class ApiHttp
         }
         catch
         {
-            return (null, text);
+            return (null, text, NoDetails);
         }
 
         if (body.Kind != NodeKind.Object)
-            return (null, null);
+            return (null, null, NoDetails);
 
         var errorKey = body.Get("error_key").AsString();
         var message = body.Has("error") ? body.Get("error").AsString()
             : body.Has("message") ? body.Get("message").AsString()
             : null;
-        return (errorKey, message);
+        var details = body.Without("error_key", "error", "message").ToObjectGraph()
+            as IReadOnlyDictionary<string, object?> ?? NoDetails;
+        return (errorKey, message, details);
     }
 
     private static double? ParseRetryAfter(HttpResult resp)

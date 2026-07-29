@@ -20,8 +20,10 @@
 //     every model factory + the pump (config-only key handling — never a method argument).
 //   * Slug catalog — RequestFieldsAsync() is fetched once + cached; its slug→type map types every
 //     value (address parses to a dictionary, photo becomes a lazy binary handle, etc.).
-//   * Binary — a value's BinaryHandle.BytesAsync() GETs the slot file endpoint, unwraps the API's
-//     {"encrypted":true,"value":<wrapper>} envelope, and runs the same service-key decrypt.
+//   * Binary — a value's BinaryHandle.BytesAsync() GETs the slot file endpoint and returns the file
+//     bytes. #590: that endpoint has two 200 shapes — an {"encrypted":true,"value":<wrapper>} JSON
+//     envelope the same service-key decrypt unwraps, or the raw file bytes under the file's own
+//     Content-Type — and BinaryFetchImpl classifies which arrived so the caller never has to.
 //   * Changes feed — ProcessChangesAsync delegates to the Pump, injecting a fetch closure
 //     (GET /changes?limit=) and a decrypt closure that builds a typed Change.
 
@@ -129,14 +131,50 @@ public sealed class Client : IDisposable
 
     private string DecryptValueImpl(object wrapper) => Crypto.Decrypt(wrapper, _privateKey);
 
-    private async Task<object> BinaryFetchImpl(string valueUrl, CancellationToken ct)
+    /// <summary>
+    /// Fetch a company-facing binary file endpoint and classify its response.
+    /// <para>#590 — the endpoint has TWO 200 shapes and which one arrives is not the company's to
+    /// predict: a person whose source field is PRIVATE yields <c>application/json</c>
+    /// <c>{"encrypted":true,"value":&lt;wrapper&gt;}</c>, a person whose field is not yields the file's
+    /// own Content-Type and the bytes themselves. The decision is made on <c>Content-Type</c> and never
+    /// by sniffing the body — a PDF or an image that happened to start with a brace would be
+    /// indistinguishable from a wrapper.</para>
+    /// <para>A 410 <c>company_data.file_expired</c> (the answer's 90-day retention has elapsed)
+    /// surfaces as an <see cref="ApiException"/> whose <see cref="ApiException.Details"/> carry
+    /// <c>content_sha256</c> and <c>expired_at</c>.</para>
+    /// </summary>
+    private async Task<BinaryFetchResult> BinaryFetchImpl(string valueUrl, CancellationToken ct)
     {
-        // Fetch the slot file endpoint and unwrap its {"encrypted":true,"value":...} envelope into
-        // the inner {"_enc":1,...} wrapper, which the BinaryHandle then decrypts.
-        var body = await _http.GetAsync(valueUrl, ct: ct).ConfigureAwait(false);
-        if (body.Kind == NodeKind.Object && body.Has("value"))
-            return body.Get("value");
-        return body; // defensive: some shapes might return the wrapper directly
+        var resp = await _http.GetResponseAsync(valueUrl, ct: ct).ConfigureAwait(false);
+        var contentType = resp.Header("Content-Type") ?? "";
+        var digest = resp.Header("X-Allus-Content-Sha256");
+
+        // Plaintext is claimed ONLY on a Content-Type that positively says so. A missing or empty
+        // header falls through to the structured path — the historical shape — because the two failure
+        // modes are not symmetrical: mistaking a wrapper for file bytes writes the ciphertext envelope
+        // to disk as if it were the document and nothing complains, while mistaking bytes for a wrapper
+        // fails loudly at the parse. Guess towards the loud one.
+        var isStructured = contentType.Length == 0
+            || contentType.Contains("json", StringComparison.OrdinalIgnoreCase)
+            || contentType.Contains("xml", StringComparison.OrdinalIgnoreCase);
+        if (!isStructured)
+            return new BinaryFetchResult(
+                Encrypted: false,
+                Bytes: resp.BodyBytes,
+                ContentType: contentType,
+                ContentSha256: digest);
+
+        // Parsed through the transport's own JSON/XML choice, so an xml-format client keeps working
+        // exactly as it did when this went through GetAsync.
+        var body = _http.ParseResponse(resp);
+        var wrapper = body.Kind == NodeKind.Object && body.Has("value")
+            ? body.Get("value")
+            : body; // defensive: some shapes might return the wrapper directly
+        return new BinaryFetchResult(
+            Encrypted: true,
+            Wrapper: wrapper,
+            ContentType: contentType.Length == 0 ? null : contentType,
+            ContentSha256: digest);
     }
 
     private string? TypeForSlugImpl(string slug)

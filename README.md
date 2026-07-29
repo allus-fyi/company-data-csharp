@@ -435,18 +435,41 @@ you call `.BytesAsync()` or `.SaveAsync()`:
 ```csharp
 var handle = (BinaryHandle)conn.Values["passport_scan"].ValueObj!;  // no network yet
 
-byte[] data = await handle.BytesAsync();                  // GET the slot file → decrypt → file bytes
+byte[] data = await handle.BytesAsync();                  // GET the slot file → the file bytes
 int    n    = await handle.SaveAsync("/tmp/passport.jpg"); // same, atomically written to disk; returns bytes written
 Console.WriteLine(handle.ValueUrl);                        // the opaque slot-keyed URL it fetches from
+Console.WriteLine(handle.ContentType);                     // what the bytes arrived as, once fetched
+Console.WriteLine(handle.ContentSha256);                   // the platform's X-Allus-Content-Sha256
 ```
 
-`.BytesAsync()` GETs the slot-keyed file endpoint, unwraps the API's
-`{"encrypted": true, "value": <wrapper>}` envelope, decrypts with your service
-key, parses the inner JSON envelope (`{"full": "data:…"}` for photos,
-`{"file": "data:…"}` for documents) and base64-decodes the data URI into the file
-bytes. The result is cached on the handle, so repeated calls don't re-fetch.
-`.SaveAsync()` writes atomically (temp file → flush-to-disk → atomic move), so a
-crash mid-write never leaves a truncated file.
+`.BytesAsync()` GETs the slot-keyed file endpoint and gives you the file bytes.
+**That endpoint has two 200 shapes, and which one you get is the person's choice,
+not yours** — it depends on whether their source field is private, they can change
+it at any time, and nothing announces it in advance:
+
+* **private source** → `application/json` `{"encrypted": true, "value": <wrapper>}`.
+  The SDK decrypts the wrapper with your service key, parses the inner JSON
+  envelope (`{"full": "data:…"}` for photos, `{"file": "data:…"}` for documents)
+  and base64-decodes the data URI into the file bytes.
+* **plaintext source** → the file's own `Content-Type` (`image/jpeg`,
+  `application/pdf`, …) and the body **is** the file. Nothing to decrypt.
+
+The handle absorbs the difference — you call `.BytesAsync()` either way. The result
+is cached on the handle, so repeated calls don't re-fetch. `.SaveAsync()` writes
+atomically (temp file → flush-to-disk → atomic move), so a crash mid-write never
+leaves a truncated file.
+
+Every 200 also carries `X-Allus-Content-Sha256` — the sha256 of exactly the bytes
+returned — surfaced as `handle.ContentSha256` (with `handle.ContentType` for the
+media type). Record it and you can later show your archived copy has not drifted.
+It is the platform's word, not a signature: it proves agreement with the platform's
+record, not anything to a third party who doubts that record. There is **no**
+variant selection — one slot has one byte sequence and therefore one digest.
+
+A frozen (Share-once) answer is retained for 90 days. After that the endpoint
+returns **410** `company_data.file_expired`; the SDK raises `ApiException` whose
+`.Details` carry the answer's `content_sha256` and `expired_at`, so your archived
+copy is still provably the one the platform recorded.
 
 ### `Change(Id, Event, PersonId, Slug?, ValueObj?, Live?, At)`
 
@@ -874,7 +897,7 @@ C#'s `*Exception` convention).
 |-------|------|
 | `ConfigException` | Missing/invalid config, unreadable key file, or wrong passphrase — at construction (fail fast). |
 | `AuthException` | Token fetch/refresh failed (bad `client_id`/`secret`, revoked client); or a 401 survives the one automatic refresh-and-retry. |
-| `ApiException(Status, ErrorKey)` | Any non-2xx from the API; carries the HTTP `Status`, the platform `ErrorKey` (when present), and a message. |
+| `ApiException(Status, ErrorKey, Details)` | Any non-2xx from the API; carries the HTTP `Status`, the platform `ErrorKey` (when present), a message, and `Details` — the body's remaining fields verbatim (e.g. a 410 `company_data.file_expired`'s `content_sha256` + `expired_at`). |
 | `DecryptException` | A ciphertext wrapper is malformed, the key is wrong, or the GCM tag mismatches. Surfaces when a value is accessed/decrypted. |
 | `WebhookException` | Signature verification failed, or an envelope couldn't be unwrapped/parsed. |
 | `RateLimitException(RetryAfter)` | A 429 from a rate-limited endpoint. Subclass of `ApiException` (Status fixed at 429); carries `RetryAfter` (seconds, or `null`). |
@@ -926,10 +949,17 @@ the trailing 16-byte tag). **The platform only ever holds ciphertext — it neve
 sees your plaintext.**
 
 **Binary fetch.** A binary value is a lazy `BinaryHandle` over a slot-keyed
-`value_url`. On `.BytesAsync()`/`.SaveAsync()` it GETs that file endpoint, unwraps
-the `{"encrypted":true,"value":<wrapper>}` envelope, runs the same service-key
-decrypt to a JSON file-envelope, and base64-decodes its data URI to the file
-bytes. (Slot-keyed, never source-field-keyed.)
+`value_url`. On `.BytesAsync()`/`.SaveAsync()` it GETs that file endpoint and
+classifies the response on its `Content-Type` — never by sniffing the body, since a
+PDF or an image that happened to start with a brace would be indistinguishable from
+a wrapper. A JSON/XML content type (or a missing one) means the
+`{"encrypted":true,"value":<wrapper>}` envelope: the same service-key decrypt runs
+to a JSON file-envelope whose data URI base64-decodes to the file bytes. Anything
+else means the body already **is** the file. The asymmetry decides the fallback:
+mistaking a wrapper for file bytes writes ciphertext to disk as if it were the
+document and nothing complains, while mistaking bytes for a wrapper fails loudly at
+the parse — so an unknown content type guesses towards the loud failure.
+(Slot-keyed, never source-field-keyed.)
 
 **The drain-on-fetch feed.** `ProcessChangesAsync` delegates to a `Pump` wired to a
 fetch closure (`GET /changes?limit=`, returning raw ciphertext events) and a

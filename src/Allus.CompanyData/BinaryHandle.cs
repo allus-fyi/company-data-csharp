@@ -1,16 +1,29 @@
 // Lazy handle for a binary (photo/document) value.
 //
 // A binary answer is stored server-side as a file, exposed in the hardened API as a slot-keyed
-// value_url (never the source field). On .BytesAsync() / .SaveAsync() the handle GETs that URL,
-// receives the {"_enc":1,...} wrapper, runs the same decrypt as text → a JSON envelope STRING
-// (photo: {"full":"data:...","thumb":...}; document: {"file":"data:...",...}) — NOT raw bytes —
-// then parses the envelope and base64-decodes the primary data-URI payload (`full` for photos,
-// `file` for documents) into the file bytes.
+// value_url (never the source field). .BytesAsync() and .SaveAsync() GET that URL and return the
+// FILE BYTES either way — the caller never has to know which of the two response shapes arrived.
+//
+// #590 — THERE ARE TWO SHAPES, AND WHICH ONE ARRIVES IS THE PERSON'S CHOICE, NOT THE COMPANY'S.
+// Whether the person's source field is private decides it, they can change it at any time, and
+// nothing in the API announces it in advance:
+//
+//   * private source → application/json {"encrypted":true,"value":<wrapper>}. The wrapper decrypts
+//     to a JSON envelope STRING (photo: {"full":"data:...","thumb":...}; document:
+//     {"file":"data:...",...}) — NOT raw bytes — whose primary data-URI payload (`full` for photos,
+//     `file` for documents) base64-decodes to the file.
+//   * plaintext source → the file's own Content-Type and the body IS the file. There is nothing to
+//     decrypt, and a handle built this way needs no service key at all.
+//
+// Photos resolve to the `full` representation. There is no variant selection: one slot has one byte
+// sequence and therefore one digest.
 //
 // The fetch + decrypt are supplied by the client as plain callables (config-only key handling —
 // the decrypt closure closes over the loaded service private key, so no key is ever passed here).
-// For the shared crypto test vector the decrypted envelope is already in hand, so a handle can
-// also be built directly from an envelope string (no fetch).
+// The fetch returns a BinaryFetchResult saying which shape arrived (the client classifies it on the
+// response's Content-Type; the body is never sniffed). For the shared crypto test vector the
+// decrypted envelope is already in hand, so a handle can also be built directly from an envelope
+// string (no fetch).
 
 using System.Text.Json;
 
@@ -24,8 +37,13 @@ public sealed class BinaryHandle
 
     private string? _envelopeJson;
     private readonly string? _valueUrl;
-    private readonly Func<string, CancellationToken, Task<object>>? _fetch;
+    private readonly Func<string, CancellationToken, Task<BinaryFetchResult>>? _fetch;
     private readonly Func<object, string>? _decrypt;
+
+    // Plaintext file bytes, once a plaintext-shaped response has been fetched.
+    private byte[]? _plainBytes;
+    private string? _contentType;
+    private string? _contentSha256;
 
     /// <summary>Build a handle whose decrypted envelope is already in hand (test vector / inline).</summary>
     public BinaryHandle(string envelopeJson)
@@ -35,13 +53,14 @@ public sealed class BinaryHandle
 
     /// <summary>
     /// Build a lazy handle: <paramref name="valueUrl"/> is the slot file endpoint;
-    /// <paramref name="fetch"/> GETs it and returns the inner <c>{"_enc":1,...}</c> wrapper;
-    /// <paramref name="decrypt"/> turns that wrapper into the decrypted envelope string (closes
-    /// over the service private key). A null <paramref name="valueUrl"/> = an empty handle.
+    /// <paramref name="fetch"/> GETs it and reports which of the two 200 shapes arrived (#590);
+    /// <paramref name="decrypt"/> turns an encrypted shape's wrapper into the decrypted envelope
+    /// string (closes over the service private key) and is never called for a plaintext one.
+    /// A null <paramref name="valueUrl"/> = an empty handle.
     /// </summary>
     public BinaryHandle(
         string? valueUrl,
-        Func<string, CancellationToken, Task<object>>? fetch,
+        Func<string, CancellationToken, Task<BinaryFetchResult>>? fetch,
         Func<object, string>? decrypt)
     {
         _valueUrl = valueUrl;
@@ -52,18 +71,59 @@ public sealed class BinaryHandle
     /// <summary>The slot-keyed file URL this handle fetches from (opaque to callers).</summary>
     public string? ValueUrl => _valueUrl;
 
+    /// <summary>
+    /// The platform's <c>X-Allus-Content-Sha256</c> for the bytes this handle fetched — the sha256 of
+    /// exactly what <see cref="BytesAsync"/> returns, so a consumer can record it and later show that
+    /// its archived copy has not drifted. <c>null</c> until something has been fetched, and on a handle
+    /// built from an envelope that was never fetched through this class.
+    /// <para>It is the platform's word, not a signature: it proves agreement with the platform's
+    /// record, not anything to a third party who doubts that record.</para>
+    /// </summary>
+    public string? ContentSha256 => _contentSha256;
+
+    /// <summary>The response <c>Content-Type</c> the bytes arrived with, once fetched.</summary>
+    public string? ContentType => _contentType;
+
     private async Task<string> ResolveEnvelopeAsync(CancellationToken ct)
     {
         if (_envelopeJson is not null)
             return _envelopeJson;
-        if (_fetch is null || _decrypt is null || _valueUrl is null)
+        await FetchOnceAsync(ct).ConfigureAwait(false);
+        if (_envelopeJson is null)
+            throw new DecryptException("binary answer arrived as plaintext bytes; use BytesAsync()/SaveAsync()");
+        return _envelopeJson;
+    }
+
+    /// <summary>
+    /// Fetch once and record which shape arrived. Idempotent: the result is cached on the handle so
+    /// repeated <see cref="BytesAsync"/>/<see cref="SaveAsync"/> calls do not re-fetch, and so a
+    /// plaintext answer's digest survives for <see cref="ContentSha256"/>.
+    /// </summary>
+    private async Task FetchOnceAsync(CancellationToken ct)
+    {
+        if (_plainBytes is not null || _envelopeJson is not null)
+            return;
+        if (_fetch is null || _valueUrl is null)
             throw new DecryptException(
-                "BinaryHandle has no envelope and no fetch/decrypt wiring " +
+                "BinaryHandle has no envelope and no fetch wiring " +
                 "(build it with an envelope string, or value_url + fetch + decrypt)");
-        var wrapper = await _fetch(_valueUrl, ct).ConfigureAwait(false);
-        var envelope = _decrypt(wrapper);
-        _envelopeJson = envelope; // cache so repeated reads don't re-fetch
-        return envelope;
+
+        var result = await _fetch(_valueUrl, ct).ConfigureAwait(false);
+        _contentType = result.ContentType;
+        _contentSha256 = result.ContentSha256;
+
+        if (!result.Encrypted)
+        {
+            // A plaintext answer needs no service key. Requiring `decrypt` here would make a handle
+            // built without one fail on exactly the answers that do not need it.
+            _plainBytes = result.Bytes ?? Array.Empty<byte>();
+            return;
+        }
+        if (_decrypt is null)
+            throw new DecryptException("binary answer is encrypted but this handle has no decrypt wiring");
+        if (result.Wrapper is null)
+            throw new DecryptException("binary answer is encrypted but carried no wrapper");
+        _envelopeJson = _decrypt(result.Wrapper); // cached so repeated reads don't re-fetch
     }
 
     /// <summary>
@@ -115,10 +175,20 @@ public sealed class BinaryHandle
     }
 
     /// <summary>
-    /// Fetch (if needed), decrypt, and return the decoded primary file bytes.
+    /// Fetch (if needed), decrypt, and return the decoded primary file bytes. #590: a plaintext-shaped
+    /// answer short-circuits here — its body already IS the file, so there is no envelope to parse.
     /// </summary>
     public async Task<byte[]> BytesAsync(CancellationToken ct = default)
     {
+        if (_plainBytes is not null)
+            return _plainBytes;
+        if (_envelopeJson is null)
+        {
+            await FetchOnceAsync(ct).ConfigureAwait(false);
+            if (_plainBytes is not null)
+                return _plainBytes;
+        }
+
         var envelope = await ResolveEnvelopeAsync(ct).ConfigureAwait(false);
         return ParseEnvelopeBytes(envelope);
     }

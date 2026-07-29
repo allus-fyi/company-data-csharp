@@ -32,8 +32,11 @@ public delegate string DecryptValue(object wrapper);
 /// <summary>A type resolver: slug → the request field's type (e.g. "email", "photo"), or null.</summary>
 public delegate string? TypeForSlug(string slug);
 
-/// <summary>A binary fetch closure: a slot value_url → the inner {"_enc":1,...} wrapper object.</summary>
-public delegate Task<object> BinaryFetch(string valueUrl, CancellationToken ct);
+/// <summary>
+/// A binary fetch closure: a slot value_url → the classified response (#590 — either the inner
+/// {"_enc":1,...} wrapper, or the file bytes themselves when the person's source field is not private).
+/// </summary>
+public delegate Task<BinaryFetchResult> BinaryFetch(string valueUrl, CancellationToken ct);
 
 internal static class ModelCoerce
 {
@@ -165,7 +168,7 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
             var valueUrl = obj.Get("value_url").AsString();
             if (valueUrl is null)
                 return new BinaryHandle(valueUrl: null, fetch: null, decrypt: null);
-            Func<string, CancellationToken, Task<object>>? fetch = binaryFetch is null
+            Func<string, CancellationToken, Task<BinaryFetchResult>>? fetch = binaryFetch is null
                 ? null
                 : (url, ct) => binaryFetch(url, ct);
             return new BinaryHandle(valueUrl, fetch, w => decryptValue(w));

@@ -7,7 +7,7 @@ convention). All in `Allus.CompanyData`.
 |-------|-------------|
 | `ConfigException` | Missing/invalid config, an unreadable key file, or a wrong passphrase — at construction (fail fast). |
 | `AuthException` | The `client_credentials` token fetch/refresh failed (bad `client_id`/`secret`, revoked client); or a mid-flight 401 survived the one automatic refresh-and-retry. |
-| `ApiException(Status, ErrorKey)` | Any non-2xx from the API. |
+| `ApiException(Status, ErrorKey, Details)` | Any non-2xx from the API. `Details` carries the body's remaining fields (e.g. a 410 `company_data.file_expired`'s `content_sha256` + `expired_at`). |
 | `DecryptException` | A ciphertext wrapper is malformed, the key is wrong, or the GCM tag mismatches. |
 | `WebhookException` | Signature verification failed, or a webhook envelope couldn't be unwrapped/parsed. |
 | `RateLimitException(RetryAfter)` | A 429 from a rate-limited endpoint. Subclass of `ApiException`. |
@@ -19,6 +19,7 @@ public class ApiException : Exception
 {
     public int     Status   { get; }   // the HTTP status
     public string? ErrorKey { get; }   // the platform error_key, when the body provided one
+    public IReadOnlyDictionary<string, object?> Details { get; }  // the body's remaining fields, verbatim
     // Message carries a human-readable description.
 }
 ```
@@ -26,6 +27,20 @@ public class ApiException : Exception
 `ex.Message` reads `"HTTP <status> (<error_key>): <message>"`. A transport failure
 (no HTTP response — e.g. a connection error) surfaces as `ApiException` with
 `Status == 0`.
+
+`Details` is everything the error body carried besides `error_key`/`error`/`message`
+— generic on purpose, so a response with actionable data needs no bespoke exception
+type. The live example is a binary slot whose frozen answer has passed its 90-day
+retention:
+
+```csharp
+catch (ApiException e) when (e.ErrorKey == "company_data.file_expired")
+{
+    // e.Status == 410
+    var digest    = e.Details["content_sha256"];  // sha256 of the bytes that used to be served
+    var expiredAt = e.Details["expired_at"];      // when the retention elapsed
+}
+```
 
 ## `RateLimitException`
 
@@ -52,7 +67,7 @@ reason. If you catch it, wait `ex.RetryAfter` (or a default) before retrying.
 | `Client.FromConfig` / `FromEnv` (construction) | `ConfigException` |
 | Token / any call (auth) | `AuthException` |
 | `ConnectionsAsync`, `ConnectionAsync`, `RequestFieldsAsync`, `LogsAsync`, pump drains | `ApiException`, `RateLimitException` |
-| Value access / `BinaryHandle.BytesAsync()` / pump delivery | `DecryptException` |
+| Value access / `BinaryHandle.BytesAsync()` / pump delivery | `DecryptException`; `ApiException` on the binary slot file endpoint (incl. 410 `company_data.file_expired`) |
 | `VerifyWebhook` / `ParseWebhook` / `HandleWebhook` | `WebhookException` (`VerifyWebhook` returns `false` rather than throwing on a bad signature) |
 
 ## Example

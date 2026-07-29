@@ -4,7 +4,7 @@
 // |--------------------------------|---------------------------------------------------|
 // | ConfigException                | Missing/invalid config or key file at construction|
 // | AuthException                  | Token fetch/refresh failed (bad creds, revoked).  |
-// | ApiException(status,error_key) | Any non-2xx from the API; carries status+error_key|
+// | ApiException(status,error_key) | Any non-2xx; status + error_key + the body's other fields |
 // | DecryptException               | Wrapper malformed, wrong key, or GCM tag mismatch.|
 // | WebhookException               | Signature verification failed / envelope unwrap.  |
 // | RateLimitException(retryAfter) | A 429 (subclass of ApiException); carries Retry-After.|
@@ -35,21 +35,40 @@ public class AuthException : Exception
 
 /// <summary>
 /// Any non-2xx from the API. Carries the HTTP <see cref="Status"/>, the platform
-/// <see cref="ErrorKey"/> (when the body provided one), and a human-readable message.
+/// <see cref="ErrorKey"/> (when the body provided one), a human-readable message, and the error
+/// body's remaining fields as <see cref="Details"/>.
 /// </summary>
 public class ApiException : Exception
 {
+    private static readonly IReadOnlyDictionary<string, object?> NoDetails =
+        new Dictionary<string, object?>();
+
     /// <summary>The HTTP status code (0 for a transport-level failure).</summary>
     public int Status { get; }
 
     /// <summary>The platform <c>error_key</c> from the body, or <c>null</c> if absent.</summary>
     public string? ErrorKey { get; }
 
-    public ApiException(int status, string? errorKey = null, string? message = null)
+    /// <summary>
+    /// The error body's remaining fields, verbatim (empty when the body carried none).
+    /// <para>#590 added the first response that carries actionable data BESIDE the key: a 410
+    /// <c>company_data.file_expired</c> returns the expired answer's <c>content_sha256</c> and
+    /// <c>expired_at</c>, so a consumer can record that its archived copy is now the only one and
+    /// still prove what it holds. Generic rather than a bespoke subclass — every error body's extra
+    /// fields become reachable, and no future one needs a new exception type to be readable.</para>
+    /// </summary>
+    public IReadOnlyDictionary<string, object?> Details { get; }
+
+    public ApiException(
+        int status,
+        string? errorKey = null,
+        string? message = null,
+        IReadOnlyDictionary<string, object?>? details = null)
         : base(BuildMessage(status, errorKey, message))
     {
         Status = status;
         ErrorKey = errorKey;
+        Details = details ?? NoDetails;
     }
 
     private static string BuildMessage(int status, string? errorKey, string? message)

@@ -75,23 +75,45 @@ A lazy handle for a binary value. No network or decryption happens at constructi
 ```csharp
 public sealed class BinaryHandle
 {
-    public string? ValueUrl { get; }                                   // the opaque slot-keyed file URL (read-only)
-    public Task<byte[]> BytesAsync(CancellationToken ct = default);     // fetch (if needed) → decrypt → decoded primary file bytes
+    public string? ValueUrl      { get; }                              // the opaque slot-keyed file URL (read-only)
+    public string? ContentType   { get; }                              // what the bytes arrived as; null until fetched
+    public string? ContentSha256 { get; }                              // the platform's X-Allus-Content-Sha256; null until fetched
+    public Task<byte[]> BytesAsync(CancellationToken ct = default);     // fetch (if needed) → the primary file bytes
     public Task<int>    SaveAsync(string path, CancellationToken ct);   // write BytesAsync() to path (atomic); returns bytes written
 }
 ```
 
-On first `.BytesAsync()`/`.SaveAsync()`:
+The file endpoint has **two 200 shapes**, and which one arrives is the person's
+choice, not yours: it depends on whether their source field is private, and nothing
+in the API announces it in advance. The handle absorbs the difference — the same
+`.BytesAsync()` returns the file either way.
 
-1. GET the slot-keyed file endpoint → the API serves `{"encrypted": true, "value": <wrapper>}`.
-2. Decrypt the inner `{"_enc":1,…}` wrapper with the service key → a JSON file-envelope string (`{"full": "data:…", "thumb": …}` for photos, `{"file": "data:…", …}` for documents).
-3. Base64-decode the primary data URI (`full` for photos, `file` for documents) → the file bytes. Cached on the handle (repeated calls don't re-fetch).
+On first `.BytesAsync()`/`.SaveAsync()` it GETs the slot-keyed file endpoint and
+classifies the response on its `Content-Type` (never by sniffing the body):
+
+* **JSON/XML content type, or none at all** → the encrypted shape,
+  `{"encrypted": true, "value": <wrapper>}`:
+  1. Decrypt the inner `{"_enc":1,…}` wrapper with the service key → a JSON file-envelope string (`{"full": "data:…", "thumb": …}` for photos, `{"file": "data:…", …}` for documents).
+  2. Base64-decode the primary data URI (`full` for photos, `file` for documents) → the file bytes.
+* **anything else** (`image/jpeg`, `application/pdf`, …) → the plaintext shape: the
+  body already **is** the file. Nothing is decrypted and no service key is needed.
+
+A missing content type falls back to the encrypted shape deliberately: mistaking a
+wrapper for file bytes writes ciphertext to disk as if it were the document and
+nothing complains, while mistaking bytes for a wrapper fails loudly at the parse.
+
+Either way the bytes are cached on the handle (repeated calls don't re-fetch), and
+`ContentSha256` holds the response's `X-Allus-Content-Sha256` — the sha256 of
+exactly the bytes returned. There is no variant selection: one slot has one byte
+sequence and therefore one digest.
 
 `.SaveAsync()` writes crash-safely: a temp file in the destination directory is
 written, flushed to disk (`FileStream.Flush(flushToDisk: true)`), then atomically
 `File.Move(temp, dest, overwrite: true)`-d — so a crash mid-write never leaves a
 truncated output. An unanswered binary slot yields an empty handle; calling
-`.BytesAsync()` on it throws `DecryptException`.
+`.BytesAsync()` on it throws `DecryptException`. A frozen answer whose 90-day
+retention has elapsed yields a **410** `company_data.file_expired` as an
+`ApiException` carrying `content_sha256` + `expired_at` in `.Details`.
 
 ## `Change`
 
