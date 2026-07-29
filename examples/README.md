@@ -126,8 +126,9 @@ finds the run by it.
 
 | Step | SDK call the handler makes |
 |---|---|
+| Resolve the flow | `Client.RequestFieldsAsync()`, matched by the configured flow name + published version |
 | Bind the company party | `Client.IdentityAsync()` → `Identity.CompanyUserId` |
-| Bind the customer party | `Client.ConnectionAsync(connectionId)` → `Connection.PersonId` |
+| Resolve + bind the customer party | `Client.ConnectionsAsync()`, matched by the configured share code → `Connection.PersonId` |
 | Trigger the run | `Client.TriggerFlowRunAsync(flowId, connectionId, bindings)` |
 | Each poll — read the run | `Client.FlowRunAsync(flowRunId)` |
 | Drive one company step | `Client.ProcessFlowRunAsync(flowRunId, fillNode)` (a rejected value throws `ValidationException`) |

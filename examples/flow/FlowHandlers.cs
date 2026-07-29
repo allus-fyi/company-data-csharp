@@ -83,8 +83,9 @@ public sealed class FlowHandlers
     // scenario>`, appended AT the call site, in the order the calls were made. Keep them in step when
     // this handler changes.
     private const string CallServiceBuild = "Client.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase";
+    private const string CallRequestFields = "Client.RequestFieldsAsync — resolves the flow name + published version (the only handle the portal ever shows for it) to its flow id";
     private const string CallIdentity = "Client.IdentityAsync — GET /api/company-data/whoami: this service's own company_user_id, which the COMPANY party binds to";
-    private const string CallConnection = "Client.ConnectionAsync — reads the configured connection; the connected person's id on it is what the CUSTOMER party binds to";
+    private const string CallConnections = "Client.ConnectionsAsync — resolves the person's own share code to the connection whose id the CUSTOMER party binds to";
     private const string CallTrigger = "Client.TriggerFlowRunAsync — starts a run of the published flow for that connection, pinning the flow's latest published version";
     private const string CallFlowRun = "Client.FlowRunAsync — re-read on every poll to see whose turn the run is on";
     private const string CallProcess = "Client.ProcessFlowRunAsync — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the document when the submit lands on a document-mode leaf";
@@ -105,9 +106,11 @@ public sealed class FlowHandlers
 
     /// <summary>
     /// Write the browser's setup values to a canonical SDK config FILE (service role). The service PEM
-    /// is written to config/keys/ and referenced by path; the demo-only run parameters (published flow
-    /// id, connection id, fixture choice) go to the meta sidecar so the config file stays a pure SDK
-    /// config the run executes off.
+    /// is written to config/keys/ and referenced by path; the demo-only run parameters (flow name +
+    /// published version, the person's share code, fixture choice) go to the meta sidecar so the config
+    /// file stays a pure SDK config the run executes off. Neither the flow id nor the connection id is
+    /// ever collected here — <see cref="Start"/> resolves both via the SDK instead of taking either as a
+    /// raw database id.
     /// </summary>
     public async Task SaveConfig(HttpContext ctx, string id)
     {
@@ -130,8 +133,9 @@ public sealed class FlowHandlers
         // Demo-only run parameters (NOT SDK Config fields) → meta sidecar.
         _rt.WriteConfigMeta(ScenarioId, new Dictionary<string, object?>
         {
-            ["flow_id"] = Web.Str(body, "flowId") ?? "",
-            ["connection_id"] = Web.Str(body, "connectionId") ?? "",
+            ["flow_name"] = Web.Str(body, "flowName") ?? "",
+            ["flow_version"] = Web.Str(body, "flowVersion") ?? "",
+            ["share_code"] = Web.Str(body, "shareCode") ?? "",
             ["fixture"] = Web.Str(body, "fixture") ?? "",
         });
 
@@ -141,10 +145,12 @@ public sealed class FlowHandlers
     // ── POST /api/scenarios/{id}/start ────────────────────────────────────────────
 
     /// <summary>
-    /// Trigger the flow run. Build the service Client from the persisted config file, construct the
-    /// bindings via the intended SDK surface (company → IdentityAsync().CompanyUserId; customer →
-    /// Connection.PersonId), call TriggerFlowRunAsync, and store the returned platform flowRunId in the
-    /// demo run file. Returns {runId, action:{"type":"none"}} — the drive happens on the GET /api/runs poll.
+    /// Trigger the flow run. Build the service Client from the persisted config file, resolve the flow
+    /// name + published version and the person's share code to the ids TriggerFlowRunAsync needs
+    /// (neither is ever collected as a raw id), construct the bindings via the intended SDK surface
+    /// (company → IdentityAsync().CompanyUserId; customer → Connection.PersonId), call
+    /// TriggerFlowRunAsync, and store the returned platform flowRunId in the demo run file. Returns
+    /// {runId, action:{"type":"none"}} — the drive happens on the GET /api/runs poll.
     /// </summary>
     public async Task Start(HttpContext ctx, string id)
     {
@@ -156,11 +162,20 @@ public sealed class FlowHandlers
             return;
         }
         var meta = _rt.ReadConfigMeta(ScenarioId);
-        var flowId = Web.Str(meta, "flow_id") ?? "";
-        var connectionId = Web.Str(meta, "connection_id") ?? "";
-        if (flowId.Length == 0 || connectionId.Length == 0)
+        var flowName = (Web.Str(meta, "flow_name") ?? "").Trim();
+        var flowVersionRaw = (Web.Str(meta, "flow_version") ?? "").Trim();
+        var shareCode = (Web.Str(meta, "share_code") ?? "").Trim();
+        if (flowName.Length == 0 || flowVersionRaw.Length == 0 || shareCode.Length == 0)
         {
-            await Web.WriteJson(ctx, new { error = "not_configured", message = "flow id and connection id are required" }, 409);
+            await Web.WriteJson(
+                ctx,
+                new { error = "not_configured", message = "flow name, published version and share code are required" },
+                409);
+            return;
+        }
+        if (!int.TryParse(flowVersionRaw, out var flowVersion) || flowVersion < 0)
+        {
+            await Web.WriteFailure(ctx, $"published version \"{flowVersionRaw}\" is not a number", "start_failed", 400);
             return;
         }
 
@@ -170,6 +185,29 @@ public sealed class FlowHandlers
         {
             calls.Add(CallServiceBuild);
             var client = ServiceClient();
+
+            // Resolve the flow name + published version to its flow id. The pair is not guaranteed
+            // unique (nothing enforces it), so this can return zero, one, or more than one candidate —
+            // only exactly one is safe to proceed on; anything else refuses rather than guess.
+            calls.Add(CallRequestFields);
+            var flowCandidates = await ResolveFlowIdCandidatesAsync(client, flowName, flowVersion);
+            if (flowCandidates.Count == 0)
+            {
+                await Web.WriteFailure(
+                    ctx,
+                    $"no published flow named \"{flowName}\" at version {flowVersion} — check the name and the \"Published vN\" the portal shows next to it",
+                    "start_failed", 404);
+                return;
+            }
+            if (flowCandidates.Count > 1)
+            {
+                await Web.WriteFailure(
+                    ctx,
+                    $"more than one flow matches the name \"{flowName}\" at version {flowVersion} — rename one of them in the portal (the flow builder's name field, next to \"Published vN\") so the pair is unique, then try again",
+                    "start_failed", 409);
+                return;
+            }
+            var flowId = flowCandidates[0];
 
             // The COMPANY party binds to this service's own company_user_id (IdentityAsync).
             calls.Add(CallIdentity);
@@ -181,14 +219,23 @@ public sealed class FlowHandlers
                 return;
             }
 
-            // The CUSTOMER party binds to the connected person's public personId (no public user_id).
-            calls.Add(CallConnection);
-            var connection = await client.ConnectionAsync(connectionId);
-            var personId = connection.PersonId;
-            if (string.IsNullOrEmpty(personId))
+            // Resolve the person's own share code to their connection — the CUSTOMER party binds to
+            // the connected person's public personId (no public user_id).
+            calls.Add(CallConnections);
+            var connection = await ResolveConnectionAsync(client, shareCode);
+            if (connection is null)
             {
                 await Web.WriteFailure(
-                    ctx, $"connection {connectionId} has no personId (not found or not connected)",
+                    ctx, $"no connection found for share code \"{shareCode}\" — is the person connected to this service?",
+                    "connection_error", 404);
+                return;
+            }
+            var connectionId = connection.Id ?? "";
+            var personId = connection.PersonId;
+            if (connectionId.Length == 0 || string.IsNullOrEmpty(personId))
+            {
+                await Web.WriteFailure(
+                    ctx, $"connection for share code \"{shareCode}\" has no id/personId (not found or not connected)",
                     "connection_error", 502);
                 return;
             }
@@ -456,6 +503,72 @@ public sealed class FlowHandlers
         };
         if (run.Error is not null) outMap["error"] = run.Error;
         return outMap;
+    }
+
+    // ── resolving a name + code the developer can obtain into the ids the SDK needs ─
+
+    /// <summary>
+    /// Resolve a flow's name + published version to its CANDIDATE flow ids. flow_id/flow_name/
+    /// flow_version ride the additive <see cref="RequestField.Raw"/> object on the flow-tagged rows
+    /// RequestFieldsAsync returns — they are not typed properties of <see cref="RequestField"/>. Returns
+    /// every DISTINCT flow id whose tagged fields match both name and version, deduplicated, in
+    /// first-seen order — nothing here guarantees the pair is unique, so the caller decides what to do
+    /// with zero, one, or more than one candidate.
+    /// </summary>
+    private static async Task<List<string>> ResolveFlowIdCandidatesAsync(Client client, string flowName, int flowVersion)
+    {
+        var seen = new List<string>();
+        foreach (var field in await client.RequestFieldsAsync())
+        {
+            if (field.Raw is not IReadOnlyDictionary<string, object?> raw) continue;
+            if (!raw.TryGetValue("flow_name", out var name) || name as string != flowName) continue;
+            if (!raw.TryGetValue("flow_version", out var version) || !TryAsInt(version, out var v) || v != flowVersion) continue;
+            if (raw.TryGetValue("flow_id", out var fid) && fid is string s && s.Length > 0 && !seen.Contains(s))
+                seen.Add(s);
+        }
+        return seen;
+    }
+
+    /// <summary>
+    /// Resolve a person's own share code to their Connection. ConnectionsAsync auto-pages the whole
+    /// service — a demo has too few connections for that to matter, but it is the same call a real
+    /// integrator would make to look a person up by the one identifier they can read off their own app.
+    /// </summary>
+    private static async Task<Connection?> ResolveConnectionAsync(Client client, string shareCode)
+    {
+        var wanted = shareCode.ToUpperInvariant();
+        await foreach (var connection in client.ConnectionsAsync())
+        {
+            if (connection.ShareCode is not null && connection.ShareCode.ToUpperInvariant() == wanted)
+                return connection;
+        }
+        return null;
+    }
+
+    /// <summary>Coerces a decoded-JSON number (long/int/double or a numeric string) to an int.</summary>
+    private static bool TryAsInt(object? v, out int result)
+    {
+        switch (v)
+        {
+            case null:
+                result = 0;
+                return false;
+            case int i:
+                result = i;
+                return true;
+            case long l:
+                result = (int)l;
+                return true;
+            case double d:
+                result = (int)d;
+                return true;
+            case string s when int.TryParse(s, out var parsed):
+                result = parsed;
+                return true;
+            default:
+                result = 0;
+                return false;
+        }
     }
 
     // ── SDK client builder — built from the persisted config FILE ──────────────────
