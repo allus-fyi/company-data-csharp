@@ -1,4 +1,4 @@
-// The CUSTOMER-role client (b2b, #168).
+// The CUSTOMER-role client (b2b).
 //
 // CustomerClient is what a connecting company uses to consume and answer another
 // company's service over its acct_* credentials: list company↔company connections,
@@ -103,33 +103,33 @@ public sealed class CustomerClient
     private readonly RSA? _accountKey;
     private readonly Func<double, System.Threading.CancellationToken, Task> _sleep;
     private readonly System.Collections.Generic.Dictionary<string, RSA?> _pubKeyCache = new();
-    /// <summary>#344 review pass 2: see Client's _pubkeyLock — same hazard, same remedy.</summary>
+    /// <summary>See Client's _pubkeyLock — same hazard, same remedy.</summary>
     private readonly object _pubKeyLock = new();
     /// <summary>
-    /// #344 review pass 3: a per-key GENERATION counter, bumped by every invalidation.
+    /// A per-key GENERATION counter, bumped by every invalidation.
     /// <para>Locking the dictionary alone is not enough. The fetch path is check (locked) →
     /// release → HTTP → store (locked), so an <c>InvalidatePublicKey</c> landing between the
     /// release and the store is silently undone: the pre-rotation key is written back AFTER the
     /// removal, the <c>key_rotated</c> event has already been consumed, and with no TTL the
-    /// process encrypts to the dead key for the rest of its life — the exact symptom this issue
-    /// exists to fix.</para>
+    /// process encrypts to the dead key for the rest of its life — the exact symptom this design
+    /// exists to prevent.</para>
     /// <para>The fetch snapshots the generation before releasing the lock and stores only if it
     /// is still current; otherwise it discards its result and the next caller refetches.</para>
     /// </summary>
     private readonly System.Collections.Generic.Dictionary<string, ulong> _pubKeyGen = new();
     /// <summary>
-    /// #344 review pass 3: _serviceKeyCache and _requestTypeCache sit on the same concurrent
+    /// _serviceKeyCache and _requestTypeCache sit on the same concurrent
     /// encryption paths as _pubKeyCache, so an unsynchronised Dictionary corrupts under concurrent
     /// read+write. _requestTypeCache has no invalidator, so it needs no generation counter — but
     /// adding one later MUST bring a generation with it.
-    /// <para>#411 is that "later" for _serviceKeyCache: it now HAS an invalidator
+    /// <para>_serviceKeyCache is that "later": it now HAS an invalidator
     /// (<see cref="InvalidateServiceKey"/>, driven by the <c>service_key_rotated</c> change), so it
     /// carries _serviceKeyGen under _otherLock, on exactly the same reasoning as _pubKeyGen.</para>
     /// </summary>
     private readonly object _otherLock = new();
     private readonly System.Collections.Generic.Dictionary<string, RSA?> _serviceKeyCache = new();
     private readonly System.Collections.Generic.Dictionary<string, ulong> _serviceKeyGen = new();
-    // "companyCode/serviceCode" → {request_field_id: field_type}, for typed-answer validation (#302).
+    // "companyCode/serviceCode" → {request_field_id: field_type}, for typed-answer validation.
     private readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.Dictionary<string, string>> _requestTypeCache = new();
     private Pump? _pump;
 
@@ -286,7 +286,7 @@ public sealed class CustomerClient
     }
 
     /// <summary>
-    /// #344 — drop a person's cached RSA public key, by user id. See
+    /// Drop a person's cached RSA public key, by user id. See
     /// <see cref="Client.InvalidatePublicKey"/>; the changes feed calls this for you, webhook
     /// consumers must call it themselves. The evicted key is not disposed (an in-flight
     /// encryption may still hold it).
@@ -302,7 +302,7 @@ public sealed class CustomerClient
     }
 
     /// <summary>
-    /// #411 — drop a SERVICE's cached RSA public key, so the next answer or document encrypted to
+    /// Drop a SERVICE's cached RSA public key, so the next answer or document encrypted to
     /// it refetches. The mirror of <see cref="InvalidatePublicKey"/> in the service→customer
     /// direction.
     /// <para>The changes feed calls this for you on a <c>service_key_rotated</c> event; webhook
@@ -323,9 +323,9 @@ public sealed class CustomerClient
 
     private Change DecryptChange(Node ev)
     {
-        // #344: this cache also stores a negative (null) result, so without invalidation a person
+        // This cache also stores a negative (null) result, so without invalidation a person
         // who had not generated keys yet would stay unresolvable for the process lifetime too.
-        // #344: the pull feed names it `event`; a raw webhook body names it `action` (and on
+        // The pull feed names it `event`; a raw webhook body names it `action` (and on
         // document rows `action` carries signed|accepted|cancelled instead) — so match either key.
         if (ev.Kind == NodeKind.Object
             && (ev.Get("event").AsString() == "key_rotated" || ev.Get("action").AsString() == "key_rotated"))
@@ -333,7 +333,7 @@ public sealed class CustomerClient
             var personId = ev.Get("person_user_id").AsString() ?? ev.Get("person_id").AsString();
             if (!string.IsNullOrEmpty(personId)) InvalidatePublicKey(personId!);
         }
-        // #411: a service this customer connects to replaced its keypair — drop the cached copy so
+        // A service this customer connects to replaced its keypair — drop the cached copy so
         // the next encryption refetches. Same either-key match as above.
         if (ev.Kind == NodeKind.Object
             && (ev.Get("event").AsString() == "service_key_rotated" || ev.Get("action").AsString() == "service_key_rotated"))
@@ -381,7 +381,7 @@ public sealed class CustomerClient
     /// <summary>
     /// Resolve {request_field_id: field_type} for a service from the connect-screen lookup, cached
     /// per company/service. Best-effort — a lookup failure yields an empty map so typed-answer
-    /// validation is simply skipped (#302).
+    /// validation is simply skipped.
     /// </summary>
     private async Task<Dictionary<string, string>> RequestFieldTypesAsync(string companyCode, string serviceCode, System.Threading.CancellationToken ct)
     {
@@ -415,7 +415,7 @@ public sealed class CustomerClient
     {
         var pub = await ServiceKeyAsync(companyCode, serviceCode, ct).ConfigureAwait(false)
             ?? throw new ConfigException($"no service key for {companyCode}/{serviceCode}");
-        // #302: validate each typed answer against its request row's field type, BEFORE encryption.
+        // Validate each typed answer against its request row's field type, BEFORE encryption.
         // Skip an answer whose type can't be resolved (do not invent one).
         var types = await RequestFieldTypesAsync(companyCode, serviceCode, ct).ConfigureAwait(false);
         foreach (var a in answers)
@@ -445,7 +445,7 @@ public sealed class CustomerClient
         var body = await _http.GetAsync($"{Keys}/{companyCode}/{serviceCode}", null, ct).ConfigureAwait(false);
         var spki = body.Kind == NodeKind.Object && body.Has("public_key") ? body.Get("public_key").AsString() : null;
         var loaded = string.IsNullOrEmpty(spki) ? null : Crypto.LoadPublicKey(spki!);
-        // #411: store ONLY if no invalidation happened while the request was in flight.
+        // Store ONLY if no invalidation happened while the request was in flight.
         lock (_otherLock)
         {
             _serviceKeyGen.TryGetValue(key, out var now);

@@ -166,7 +166,7 @@ public class HttpTests
     [Fact]
     public async Task Status429PendingCapSurfacesImmediatelyWithoutRetry()
     {
-        // #481: a twofa.pending_cap 429 can never be cleared by a retry — it must surface at once as
+        // A twofa.pending_cap 429 can never be cleared by a retry — it must surface at once as
         // ApiException, NOT go through the Retry-After backoff (which every other 429 gets).
         var t = new QueueTransport();
         t.PostResponses.Enqueue(Resp.TokenOk());

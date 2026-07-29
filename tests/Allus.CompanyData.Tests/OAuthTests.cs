@@ -1,4 +1,4 @@
-// "Sign in with allme" RP OAuth client tests (#195). Ports test_oauth.py.
+// "Sign in with allme" RP OAuth client tests.
 
 using System.Collections.Generic;
 using System.IO;
@@ -71,7 +71,7 @@ public class OAuthTests
     public void AuthorizeUrlClaimValidation()
     {
         var c = new OAuthClient(IdwCfg(), new QueueTransport());
-        // #498: every claim carries a mandatory Name — the identity everything downstream is keyed by.
+        // Every claim carries a mandatory Name — the identity everything downstream is keyed by.
         var claims = new[]
         {
             new Claim("email", "email", "email_personal"),
@@ -91,7 +91,7 @@ public class OAuthTests
         Assert.True(arr[1].GetProperty("required").GetBoolean());
     }
 
-    /// #498 §2: a nameless claim, and two sharing a name, are refused at the call that made them.
+    /// A nameless claim, and two sharing a name, are refused at the call that made them.
     [Fact]
     public void AuthorizeUrlClaimNameRequired()
     {
@@ -104,7 +104,7 @@ public class OAuthTests
         }));
     }
 
-    /// #498 §3: `verified` travels on the wire, so an RP can demand a #311-attested answer.
+    /// `verified` travels on the wire, so an RP can demand an attested answer.
     [Fact]
     public void AuthorizeUrlClaimVerified()
     {
@@ -146,7 +146,7 @@ public class OAuthTests
         Assert.Equal("authorization_code", t.Posts[0].Form["grant_type"]);
         Assert.Equal("V", t.Posts[0].Form["code_verifier"]);
         var info = await c.UserinfoAsync("AT");
-        // #498 §5: `sub` IS the share code (byte-identical to the id_token's); display_name is gone.
+        // `sub` IS the share code (byte-identical to the id_token's); display_name is gone.
         Assert.Equal("AB12CD", info.GetProperty("sub").GetString());
         Assert.Equal(info.GetProperty("share_code").GetString(), info.GetProperty("sub").GetString());
         Assert.False(info.TryGetProperty("display_name", out _));
@@ -172,11 +172,11 @@ public class OAuthTests
         var res = await c.CompleteSignInAsync("CODE", "V");
         Assert.Equal("one_time", res.Mode);
         Assert.True(res.TwoFactor);
-        // #498 §5: Sub IS the share code (byte-identical to the id_token's); DisplayName is gone.
+        // Sub IS the share code (byte-identical to the id_token's); DisplayName is gone.
         Assert.Equal("AB12CD", res.Sub);
         Assert.Equal(res.Sub, res.ShareCode);
         Assert.Equal(Vector.TextPlaintext, res.Values["email_personal"]);
-        // #498 §3.1a: no `values_attestation` on the wire → "not attested", never "wrong".
+        // No `values_attestation` on the wire → "not attested", never "wrong".
         Assert.Empty(res.Attestations);
     }
 
@@ -204,7 +204,7 @@ public class OAuthTests
         Assert.Equal(410, ex.Status);
     }
 
-    // ── #481: 2fa_enroll mode + detached enrollment poll delivery ──────────
+    // ── 2fa_enroll mode + detached enrollment poll delivery ─────────────────
     [Fact]
     public void AuthorizeUrlAccepts2faEnrollMode()
     {
@@ -217,7 +217,7 @@ public class OAuthTests
     [Fact]
     public async Task PollResultPendingThenEnrolled()
     {
-        // #481: a detached 2fa_enroll delivers {enrolled: true, state}, NOT a code. PollResultAsync
+        // A detached 2fa_enroll delivers {enrolled: true, state}, NOT a code. PollResultAsync
         // must return on the `enrolled` sentinel — otherwise it consumes the one-shot result and times out.
         var t = new QueueTransport();
         t.PostResponses.Enqueue(Resp.Text(202, ""));

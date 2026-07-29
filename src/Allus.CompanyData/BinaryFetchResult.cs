@@ -1,6 +1,6 @@
 // One response from a company-facing binary file endpoint, in the shape a BinaryHandle needs.
 //
-// #590 — the route has TWO 200 shapes and the company cannot predict which it will get, because the
+// The route has TWO 200 shapes and the company cannot predict which it will get, because the
 // answer depends on whether the person's source field is private, which is theirs to change:
 //
 //   * encrypted — application/json, {"encrypted":true,"value":<wrapper>}. The wrapper decrypts to the

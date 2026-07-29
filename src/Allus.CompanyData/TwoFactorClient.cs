@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 namespace Allus.CompanyData;
 
 /// <summary>
-/// #436 2FA-by-allme — a login-approval challenge returned by <see cref="TwoFactorClient.ChallengeAsync"/>
+/// 2FA-by-allme — a login-approval challenge returned by <see cref="TwoFactorClient.ChallengeAsync"/>
 /// (spec §3). <see cref="MatchingDigits"/> is present only when the service has number matching on — the
 /// two digits to DISPLAY on your login page. The person types them back into the allme app; the SERVER
 /// adjudicates them (they never leave the app on any payload). Null when number matching is off.
@@ -25,7 +25,7 @@ public sealed record TwoFactorChallenge(
 }
 
 /// <summary>
-/// #436 2FA-by-allme — the outcome of <see cref="TwoFactorClient.ResultAsync"/> (spec §3). The poll is the
+/// 2FA-by-allme — the outcome of <see cref="TwoFactorClient.ResultAsync"/> (spec §3). The poll is the
 /// record: the first read of a terminal state delivers it and burns it (a later read is <c>gone</c>).
 /// </summary>
 public sealed record TwoFactorResult(
@@ -40,7 +40,7 @@ public sealed record TwoFactorResult(
 }
 
 /// <summary>
-/// #436 2FA-by-allme — the relying-party challenge API (spec §3), on the SERVICE's data-client credentials
+/// 2FA-by-allme — the relying-party challenge API (spec §3), on the SERVICE's data-client credentials
 /// (the same auth <see cref="Client"/> uses). Reached via <see cref="Client.TwoFactor"/>.
 ///
 /// A service asks a person (by share code) to approve a login inside the allme app, then polls for the
@@ -91,7 +91,7 @@ public sealed class TwoFactorClient
     /// Poll <see cref="ResultAsync"/> until the status is terminal (no longer <c>pending</c>) and return
     /// that first terminal <see cref="TwoFactorResult"/>.
     ///
-    /// Convenience over a manual <see cref="ResultAsync"/> loop (#481; mirrors the detached
+    /// Convenience over a manual <see cref="ResultAsync"/> loop (mirrors the detached
     /// <c>PollResultAsync</c> precedent). Because the first terminal read burns the challenge, this returns
     /// as soon as the status leaves <c>pending</c> — it never re-reads a consumed result. Throws
     /// <see cref="ApiException"/> if <paramref name="timeoutSeconds"/> elapse while still pending;

@@ -1,5 +1,4 @@
-// Fake IHttpTransport doubles mirroring the Python reference's FakeSession: record calls + replay
-// scripted responses. No live API is ever touched.
+// Fake IHttpTransport doubles: record calls + replay scripted responses. No live API is ever touched.
 
 using Allus.CompanyData;
 
@@ -72,8 +71,7 @@ public sealed class QueueTransport : IHttpTransport
 
 /// <summary>
 /// Routes GET by URL through a delegate; the token POST always returns the token; write verbs
-/// (POST/PUT/DELETE with a body) record + delegate to an optional write router (mirroring the
-/// Python reference's <c>FakeSession.request</c> / <c>write_router</c>).
+/// (POST/PUT/DELETE with a body) record + delegate to an optional write router.
 /// </summary>
 public sealed class RouterTransport : IHttpTransport
 {

@@ -127,7 +127,7 @@ public class ModelTests
     {
         using var key = Vector.PrivateKey();
         string? capturedUrl = null;
-        // #590: the fetch callback classifies the response. Here it reports the ENCRYPTED shape —
+        // The fetch callback classifies the response. Here it reports the ENCRYPTED shape —
         // what the route serves when the person's source field is private.
         BinaryFetch fetch = (url, ct) =>
         {
@@ -484,7 +484,7 @@ public class ModelTests
         Assert.Equal("pro", json["plan"]); // decrypted via injected decrypt
     }
 
-    // ── B2B additive fields (#163) ────────────────────────────────────────────────────────────
+    // ── B2B additive fields ───────────────────────────────────────────────────────────────────
 
     [Fact]
     public void RequestFieldIncludesAudience()

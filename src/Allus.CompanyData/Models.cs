@@ -33,7 +33,7 @@ public delegate string DecryptValue(object wrapper);
 public delegate string? TypeForSlug(string slug);
 
 /// <summary>
-/// A binary fetch closure: a slot value_url → the classified response (#590 — either the inner
+/// A binary fetch closure: a slot value_url → the classified response (either the inner
 /// {"_enc":1,...} wrapper, or the file bytes themselves when the person's source field is not private).
 /// </summary>
 public delegate Task<BinaryFetchResult> BinaryFetch(string valueUrl, CancellationToken ct);
@@ -93,7 +93,7 @@ public sealed record RequestField(
     /// <summary>The underlying hardened API object (escape hatch).</summary>
     public object? Raw { get; init; }
 
-    /// <summary>Which customer TYPE this row applies to: "person"|"company"|"both" (B2B, #163); null on older API.</summary>
+    /// <summary>Which customer TYPE this row applies to: "person"|"company"|"both" (B2B); null on older API.</summary>
     public string? Audience { get; init; }
 
     public static RequestField FromApi(Node obj) => new(
@@ -128,7 +128,7 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
     /// <summary>The underlying hardened API value object (escape hatch).</summary>
     public object? Raw { get; init; }
 
-    /// <summary>#311: true iff the value carries verified metadata AND the hash matches.</summary>
+    /// <summary>True iff the value carries verified metadata AND the hash matches.</summary>
     public bool Verified { get; init; }
 
     public static Value FromApi(
@@ -144,7 +144,7 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
         return new Value(typed, live, updatedAt) { Raw = obj.ToObjectGraph(), Verified = VerifiedFrom(obj, typed) };
     }
 
-    /// <summary>#311: recompute the verified flag from the just-decrypted plaintext (email string only).</summary>
+    /// <summary>Recompute the verified flag from the just-decrypted plaintext (email string only).</summary>
     internal static bool VerifiedFrom(Node obj, object? plaintext)
     {
         if (plaintext is not string pt) return false;
@@ -218,7 +218,7 @@ public sealed record Connection(
     /// <summary>The underlying hardened API object (escape hatch).</summary>
     public object? Raw { get; init; }
 
-    /// <summary>The connected customer's TYPE: "person"|"company" (B2B, #163); null on older API.</summary>
+    /// <summary>The connected customer's TYPE: "person"|"company" (B2B); null on older API.</summary>
     public string? CustomerType { get; init; }
 
     /// <summary>The customer's profile share code (previously only via <see cref="Raw"/>); null when absent.</summary>
@@ -291,13 +291,13 @@ public sealed record Change(
     /// <summary>The underlying hardened API object (escape hatch).</summary>
     public object? Raw { get; init; }
 
-    /// <summary>The customer's TYPE: "person"|"company" (B2B, #163); null on older API.</summary>
+    /// <summary>The customer's TYPE: "person"|"company" (B2B); null on older API.</summary>
     public string? CustomerType { get; init; }
 
-    /// <summary>#311: true iff a field_updated value is verified (hash matches the decrypted plaintext).</summary>
+    /// <summary>True iff a field_updated value is verified (hash matches the decrypted plaintext).</summary>
     public bool Verified { get; init; }
 
-    /// <summary>#344: set on <c>key_rotated</c> — SHA-256 fingerprint of the person's NEW public key.</summary>
+    /// <summary>Set on <c>key_rotated</c> — SHA-256 fingerprint of the person's NEW public key.</summary>
     public string? PublicKeySha256 { get; init; }
 
     public static Change FromApi(
@@ -327,7 +327,7 @@ public sealed record Change(
             ValueObj: value,
             Live: live,
             DocumentId: obj.Get("document_id").AsString(),
-            // #436: 2fa_challenge_completed carries the outcome in Status (approved|denied|revoked); its
+            // 2fa_challenge_completed carries the outcome in Status (approved|denied|revoked); its
             // challenge_id/completed_at stay in Raw. The poll is the record (spec §3).
             Status: (ev == "document_status_changed" || ev == "2fa_challenge_completed") ? obj.Get("status").AsString() : null,
             Action: ev == "document_status_changed" ? obj.Get("action").AsString() : null,
@@ -467,7 +467,7 @@ public sealed record Document(
 }
 
 /// <summary>
-/// #491 gap 3: the calling client's own service identity, from <c>GET /api/company-data/whoami</c>.
+/// The calling client's own service identity, from <c>GET /api/company-data/whoami</c>.
 /// <see cref="CompanyUserId"/> is the company user the client is bound to (the value a flow-run
 /// binding's company party must use); <see cref="ServiceId"/> is its service.
 /// </summary>

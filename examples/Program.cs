@@ -25,7 +25,7 @@ using Microsoft.Extensions.Logging;
 //   4. refuse a busy port with a clear message
 //   5. serve port ${PORT:-8091} on ALL interfaces — one Kestrel host; a serializing gate keeps it
 //      single-worker (contract: no cross-request concurrency to guard) — so a phone on the same network
-//      can reach it, printing every URL it is reachable on (#553).
+//      can reach it, printing every URL it is reachable on.
 
 const int ContractVersion = Dispatcher.ContractVersion; // 3
 const string ReleaseBase = "https://github.com/allme-sdk/example-test-suite/releases/download";
@@ -88,16 +88,16 @@ var dispatcher = new Dispatcher(rt, sdkVersion);
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders(); // keep stdout to our own messages
-// ALL interfaces (Kestrel's "*" = any IP), so a phone on the same network can reach it (#553).
+// ALL interfaces (Kestrel's "*" = any IP), so a phone on the same network can reach it.
 builder.WebHost.UseUrls($"http://*:{port}");
 var app = builder.Build();
 
-// Boundary guard (#583): an unhandled handler exception otherwise leaves ASP.NET Core to answer with a
+// Boundary guard: an unhandled handler exception otherwise leaves ASP.NET Core to answer with a
 // bare 500 and NO body at all — measured `Content-Length: 0` — so the suite has no `error` to render and
 // falls back to printing the scenario number ("start failed (5)"), which reads like an error code and
-// names nothing. The other five backends all had such a guard; this one did not. It is the OUTERMOST
-// middleware so it also covers the gate below, and it answers only while the response can still be
-// written (a failure after the first byte is already on the wire is unrecoverable by anyone).
+// names nothing. It is the OUTERMOST middleware so it also covers the gate below, and it answers only
+// while the response can still be written (a failure after the first byte is already on the wire is
+// unrecoverable by anyone).
 app.Use(async (ctx, next) =>
 {
     try { await next(); }
@@ -160,7 +160,7 @@ app.Run();
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-// Announce every URL the server is reachable on (#553).
+// Announce every URL the server is reachable on.
 //
 // The server binds all interfaces, so a phone on the same network can reach it — but only if the
 // person holding the phone knows which address to type. Print the loopback URL AND every non-loopback

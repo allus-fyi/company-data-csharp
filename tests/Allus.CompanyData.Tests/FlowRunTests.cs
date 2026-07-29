@@ -1,6 +1,6 @@
-// Company-side contract-flow run methods — fully mocked (no live API). Mirrors the Python/TS/Go
-// run-method tests: trigger/list/get, decrypt-only-company, per-party fan-out + local routing,
-// generate one-time-key shape, and the ProcessFlowRun company-leaf document chain.
+// Company-side contract-flow run methods — fully mocked (no live API). Covers trigger/list/get,
+// decrypt-only-company, per-party fan-out + local routing, generate one-time-key shape, and the
+// ProcessFlowRun company-leaf document chain.
 
 using System.Security.Cryptography;
 using System.Text;

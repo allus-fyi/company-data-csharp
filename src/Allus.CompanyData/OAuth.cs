@@ -1,4 +1,4 @@
-// "Sign in with allme" — the RP-side OAuth client (#195).
+// "Sign in with allme" — the RP-side OAuth client.
 //
 // A third-party site embeds a "Sign in with allme" button, sends the person to the hosted consent
 // screen, and — once they approve — receives an authorization code at its redirect URI. This wraps
@@ -12,11 +12,11 @@ using System.Text.Json;
 namespace Allus.CompanyData;
 
 /// <summary>
-/// A claim the relying party asks for — a REQUEST FIELD (#498).
+/// A claim the relying party asks for — a REQUEST FIELD.
 ///
 /// <para>You describe what you need: a <c>Name</c> (the claim's identity on the wire), a field
 /// <c>Type</c>, an advisory <c>Suggest</c>ion, whether it is <c>Required</c>, and whether only a
-/// #311-<c>Verified</c> answer will do. You never name one of the person's fields — THEY decide which
+/// <c>Verified</c> answer will do. You never name one of the person's fields — THEY decide which
 /// of theirs answers it.</para>
 ///
 /// <para><c>Name</c> is MANDATORY and must be unique within one request: everything downstream is
@@ -24,8 +24,8 @@ namespace Allus.CompanyData;
 /// maps <see cref="OAuthClient.CompleteSignInAsync"/> returns). Two claims sharing a name are
 /// rejected rather than silently coalesced.</para>
 ///
-/// <para><c>Verified</c> is accepted only where it can be honoured (#498 §3.1b): on the OIDC flow,
-/// and only for a type #311 can attest (v1: <c>email</c>). Sending it on a <c>one_time</c> request is
+/// <para><c>Verified</c> is accepted only where it can be honoured: on the OIDC flow,
+/// and only for a type that can be attested (v1: <c>email</c>). Sending it on a <c>one_time</c> request is
 /// refused with <c>invalid_request</c> — that leg carries no source row id, so the server could
 /// neither enforce the requirement nor attest it.</para>
 /// </summary>
@@ -38,7 +38,7 @@ public sealed record Claim(
     string? Label = null);
 
 /// <summary>
-/// Proof that a delivered value is the #311-verified one (#498 §3.1a).
+/// Proof that a delivered value is the verified one.
 ///
 /// <para>Present only for a <c>Verified</c> claim under ENCRYPTED delivery. The server builds and
 /// seals it against your app key — a client-supplied attestation is never accepted — so it attests
@@ -61,12 +61,12 @@ public sealed record Attestation(bool Verified, string Hash, string Salt, string
 /// <summary>
 /// The decrypted conclusion of <see cref="OAuthClient.CompleteSignInAsync"/>.
 ///
-/// <para>#498 §5: <c>Sub</c> IS the person's SHARE CODE and is byte-identical to the id_token's
+/// <para><c>Sub</c> IS the person's SHARE CODE and is byte-identical to the id_token's
 /// <c>sub</c>; <c>ShareCode</c> is retained beside it and now simply equals it. <c>DisplayName</c> is
 /// GONE — it is a consented <c>name</c> claim now, or nothing: ask for
 /// <c>new Claim("name", "text")</c> and read <c>Values["name"]</c>.</para>
 ///
-/// <para>#498 §3.1a: <c>Attestations</c> is an ADDITIVE sibling map keyed by the SAME claim name as
+/// <para><c>Attestations</c> is an ADDITIVE sibling map keyed by the SAME claim name as
 /// <c>Values</c>, present only for a <c>Verified</c> claim under ENCRYPTED delivery. An integration
 /// that never reads it behaves exactly as before.</para>
 /// </summary>
@@ -161,7 +161,7 @@ public sealed class OAuthClient
         foreach (var c in claims)
         {
             if (string.IsNullOrEmpty(c.Type) || NonClaimable.Contains(c.Type)) continue;
-            // #498 §2: `Name` is the claim's identity and it is mandatory. Refused HERE rather than
+            // `Name` is the claim's identity and it is mandatory. Refused HERE rather than
             // left to the API, so the integration error surfaces at the call that made it.
             var name = (c.Name ?? string.Empty).Trim();
             if (name.Length == 0)
@@ -231,7 +231,7 @@ public sealed class OAuthClient
     }
 
     /// <summary>
-    /// #498 §3.1a — open the app-key-sealed attestations and attest each value ourselves.
+    /// Open the app-key-sealed attestations and attest each value ourselves.
     ///
     /// <para>A SECOND decrypt per verified claim: <c>Values</c> is byte-identical to before, but each
     /// attestation is its own <c>{"_enc":1,...}</c> object. A passthrough accessor handing back an
@@ -290,7 +290,7 @@ public sealed class OAuthClient
     /// <summary>
     /// Poll /oauth2/result for a detached sign-in or enrollment (single-delivery). A detached sign-in
     /// returns <c>{code, state}</c>; a detached <c>2fa_enroll</c> returns <c>{enrolled: true, state}</c>
-    /// (#481). Returns on the first delivered shape (<c>code</c> OR <c>enrolled</c>) and never polls past
+    /// Returns on the first delivered shape (<c>code</c> OR <c>enrolled</c>) and never polls past
     /// it, so a one-shot enrollment result is not consumed and lost.
     /// </summary>
     public async Task<JsonElement> PollResultAsync(string state, int timeoutSeconds = 600, int intervalSeconds = 2, CancellationToken ct = default)
@@ -304,7 +304,7 @@ public sealed class OAuthClient
             if (res.StatusCode == 200)
             {
                 var body = ParseObject(res.Body);
-                // #481: return on the first delivered terminal shape — a sign-in `code` OR a
+                // Return on the first delivered terminal shape — a sign-in `code` OR a
                 // `2fa_enroll` `enrolled` sentinel ({enrolled: true, state}). Both are one-shot;
                 // returning here (rather than looping) keeps an enrollment result from being consumed
                 // and lost to a timeout.

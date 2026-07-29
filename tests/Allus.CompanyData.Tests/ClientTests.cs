@@ -205,7 +205,7 @@ public sealed class ClientTests : IDisposable
     }
 
     /// <summary>
-    /// #590 — the SAME slot URL serves raw file bytes when the person's source field is NOT private.
+    /// The SAME slot URL serves raw file bytes when the person's source field is NOT private.
     /// The handle must return the file either way, without the caller knowing which shape arrived, and
     /// must not try to decrypt bytes that were never encrypted.
     /// </summary>
@@ -254,7 +254,7 @@ public sealed class ClientTests : IDisposable
     }
 
     /// <summary>
-    /// #590 — a 410 file_expired surfaces the digest and the expiry date through ApiException.Details.
+    /// A 410 file_expired surfaces the digest and the expiry date through ApiException.Details.
     /// </summary>
     [Fact]
     public async Task BinaryHandleExpiredAnswerCarriesDigest()

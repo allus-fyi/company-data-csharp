@@ -1,6 +1,5 @@
 // Shared test support: the cross-language decryption vector loader, an in-memory wrapper-encrypt
-// helper (the vector key's PUBLIC half, RSA-OAEP-SHA256 + AES-256-GCM), and fake HTTP transports
-// mirroring the Python reference's FakeSession.
+// helper (the vector key's PUBLIC half, RSA-OAEP-SHA256 + AES-256-GCM), and fake HTTP transports.
 
 using System.Security.Cryptography;
 using System.Text;

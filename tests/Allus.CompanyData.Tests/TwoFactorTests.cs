@@ -1,5 +1,5 @@
-// #481 additions to the 2FA client: WaitForResultAsync (the base challenge/result client landed via
-// #436). All mocked — a QueueTransport replays scripted challenge polls; no live API is touched.
+// Tests for WaitForResultAsync, layered atop the base challenge/result 2FA client. All mocked —
+// a QueueTransport replays scripted challenge polls; no live API is touched.
 
 using Allus.CompanyData;
 using Xunit;

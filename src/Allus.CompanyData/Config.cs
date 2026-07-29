@@ -66,10 +66,10 @@ public sealed class Config
     /// <summary>Passphrase that decrypts the service PEM in memory (service role).</summary>
     public string? KeyPassphrase { get; init; }
 
-    /// <summary>Customer role (#168): the acct_* client id.</summary>
+    /// <summary>Customer role: the acct_* client id.</summary>
     public string? CustomerClientId { get; init; }
 
-    /// <summary>Customer role (#168): the acct_* client secret.</summary>
+    /// <summary>Customer role: the acct_* client secret.</summary>
     public string? CustomerClientSecret { get; init; }
 
     /// <summary>OPTIONAL — only needed for <c>encrypt_payload</c> webhooks.</summary>
@@ -78,7 +78,7 @@ public sealed class Config
     /// <summary>OPTIONAL — passphrase for the account PEM.</summary>
     public string? AccountPassphrase { get; init; }
 
-    /// <summary>"Sign in with allme" idw role (#195): the idw_* app client id.</summary>
+    /// <summary>"Sign in with allme" idw role: the idw_* app client id.</summary>
     public string? OAuthClientId { get; init; }
 
     /// <summary>Idw role: the registered redirect URI.</summary>
@@ -168,7 +168,7 @@ public sealed class Config
     /// <summary>Build entirely from <c>ALLUS_*</c> env vars.</summary>
     public static Config FromEnv() => Build(null);
 
-    /// <summary>Load a CUSTOMER-role config (#168) from a JSON file — requires the acct_* pair
+    /// <summary>Load a CUSTOMER-role config from a JSON file — requires the acct_* pair
     /// + account key, not the service PEM. Env vars override file values.</summary>
     public static Config FromCustomerFile(string path)
     {
@@ -188,7 +188,7 @@ public sealed class Config
     /// <summary>Build a CUSTOMER-role config entirely from ALLUS_* env vars.</summary>
     public static Config FromCustomerEnv() => Build(null, "customer");
 
-    /// <summary>Load an IDW-role config (#195, "Sign in with allme") from a JSON file — requires the
+    /// <summary>Load an IDW-role config ("Sign in with allme") from a JSON file — requires the
     /// oauth_client_id + oauth_redirect_uri. Env vars override file values.</summary>
     public static Config FromIdwFile(string path)
     {
@@ -344,8 +344,8 @@ public sealed class Config
         };
     }
 
-    // Read a string sub-field from a JSON object (any non-string scalar is stringified, matching
-    // Python's str() coercion); null/missing/non-object yields null.
+    // Read a string sub-field from a JSON object (any non-string scalar is stringified via its
+    // raw JSON text); null/missing/non-object yields null.
     private static string? ObjString(JsonElement obj, string name)
     {
         if (obj.ValueKind != JsonValueKind.Object) return null;

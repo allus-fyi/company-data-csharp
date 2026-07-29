@@ -114,7 +114,7 @@ public static class Webhooks
     }
 
     // Constant-time string compare (UTF-8 bytes). Different lengths return false; FixedTimeEquals
-    // is the timing-safe primitive (mirrors Python's hmac.compare_digest for the alt-auth methods).
+    // is the timing-safe primitive used for the alt-auth methods.
     private static bool FixedTimeStringEquals(string a, string b) =>
         CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
 

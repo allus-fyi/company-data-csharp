@@ -1,5 +1,4 @@
-// FlowConditionEvaluator parity — every case in the shared vector must pass. The same vector pins
-// the PHP reference + the python/ts/go/iOS/Android ports.
+// FlowConditionEvaluator parity — every case in the shared vector must pass.
 
 using System.Text.Json;
 using Allus.CompanyData;

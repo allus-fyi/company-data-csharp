@@ -7,8 +7,8 @@
 //
 // The platform's XML serialization:
 //   * the document root is <response>;
-//   * a PHP list (int keys) renders as repeated <item> children → a list;
-//   * an associative array renders as named child tags → a dict (object);
+//   * a sequential-int-keyed array renders as repeated <item> children → a list;
+//   * an associative (string-keyed) array renders as named child tags → a dict (object);
 //   * scalars are element text; booleans were written as "true"/"false".
 //
 // We materialize XML into the same in-memory shape JSON parses to: a Node tree of
@@ -60,7 +60,7 @@ internal static class Xml
             return Node.Scalar(elem.InnerText ?? string.Empty);
         }
 
-        // All children are <item> → a list (PHP int-keyed array).
+        // All children are <item> → a list (a sequential-int-keyed array on the wire).
         if (childElements.All(c => c.LocalName == "item"))
         {
             var list = childElements.Select(ElementToNode).ToList();

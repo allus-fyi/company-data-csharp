@@ -63,11 +63,9 @@ public sealed class CompanyDataHandlers
 
     private const string DefaultApiUrl = "https://api.allme.fyi";
 
-    // The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+    // The "what just happened" trace. Every entry is `<SDK method> — <what that call did in THIS
     // scenario>`, appended AT the call site, in the order the calls were made; an entry wrapped in
-    // parentheses is a step that is deliberately NOT an SDK call. The annotations are byte-identical in
-    // all six SDK examples — only the method reference is written in the language's own idiom — so one
-    // scenario teaches one thing whichever example a reader starts. Keep them in step when this handler
+    // parentheses is a step that is deliberately NOT an SDK call. Keep them in step when this handler
     // changes.
     private const string CallServiceBuild = "Client.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase";
     private const string CallConnections = "Client.ConnectionsAsync — pages GET /api/company-data/connections: loads your request-field catalog first for value typing, then decrypts each person's values with the service key";
@@ -256,8 +254,9 @@ public sealed class CompanyDataHandlers
 
     /// <summary>
     /// companydata:documents — Client.CreateDocumentAsync() for each of the six document/contract types
-    /// (payloads verbatim from apitests/php/documents.php). The per-person / private / contract types
-    /// target the connected person by share code (from the setup sidecar).
+    /// (payloads pinned to the platform's fixed test fixtures for these document types). The
+    /// per-person / private / contract types target the connected person by share code (from the
+    /// setup sidecar).
     /// </summary>
     private async Task<object> DoDocuments(Client client, List<string> calls)
     {
@@ -327,7 +326,7 @@ public sealed class CompanyDataHandlers
     /// Start the single accumulating webhook run. Persists the routing record webhookId → runId
     /// (superseding any prior active webhook run) and returns {action:{type:"none"}} — there is NO
     /// long-poll (it would wedge the single worker). Events arrive via POST /webhook and via a per-poll
-    /// DrainBatchAsync() feed fallback; the frontend reads the growing list through GET /api/runs.
+    /// DrainBatchAsync() feed fallback; the growing list is read back via GET /api/runs.
     /// </summary>
     private async Task StartWebhook(HttpContext ctx)
     {
@@ -498,7 +497,7 @@ public sealed class CompanyDataHandlers
 
     /// <summary>
     /// The rendered-column projection of a Change PLUS a raw object holding the full public Change fields,
-    /// so the frontend's JSON.stringify(result) Raw view can show the event-specific extras. Nothing is
+    /// so a raw/detailed view of the response can still show the event-specific extras. Nothing is
     /// dropped from result. <paramref name="source"/> labels a webhook delivery vs a pull-feed row (null
     /// for the changes scenario, where every row is a pull-feed drain).
     /// </summary>
@@ -547,7 +546,7 @@ public sealed class CompanyDataHandlers
     /// <summary>
     /// Render a decrypted value for JSON. A binary value is a lazy <see cref="BinaryHandle"/> — resolve it
     /// to a short descriptor rather than dumping raw bytes; a date/datetime becomes an ISO string; a
-    /// structured value (dictionary/list) passes through for the frontend to JSON-stringify.
+    /// structured value (dictionary/list) passes through unchanged for the caller to serialize.
     /// </summary>
     private static object? StringifyValue(object? v) => v switch
     {
@@ -568,7 +567,7 @@ public sealed class CompanyDataHandlers
 
     private static string? Iso(DateTimeOffset? dt) => dt?.ToString("yyyy-MM-ddTHH:mm:sszzz");
 
-    // ── minimal PDF (verbatim shape from apitests/php/documents.php) ─────────────
+    // ── minimal PDF (verbatim shape from the platform's fixed test fixtures) ────
 
     /// <summary>A tiny valid one-page PDF carrying <paramref name="label"/> — so the broadcast/per-person/
     /// contract file docs upload real bytes without a fixture file.</summary>

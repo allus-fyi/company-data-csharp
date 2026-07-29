@@ -79,10 +79,8 @@ public sealed class FlowHandlers
     /// <summary>The canned INVALID value the validation-demo submits once for an email field.</summary>
     private const string InvalidEmail = "not-an-email";
 
-    // The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
-    // scenario>`, appended AT the call site, in the order the calls were made. The annotations are
-    // byte-identical in all six SDK examples — only the method reference is written in the language's own
-    // idiom — so one scenario teaches one thing whichever example a reader starts. Keep them in step when
+    // The "what just happened" trace. Every entry is `<SDK method> — <what that call did in THIS
+    // scenario>`, appended AT the call site, in the order the calls were made. Keep them in step when
     // this handler changes.
     private const string CallServiceBuild = "Client.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase";
     private const string CallIdentity = "Client.IdentityAsync — GET /api/company-data/whoami: this service's own company_user_id, which the COMPANY party binds to";

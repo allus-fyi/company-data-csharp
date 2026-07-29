@@ -65,11 +65,9 @@ public sealed class IdentityHandlers
     private const string DefaultApiUrl = "https://api.allme.fyi";
     private static readonly string DefaultAuthorizeBase = OAuthClient.DefaultAuthorizeUrl; // https://web.allme.fyi/auth
 
-    // The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+    // The "what just happened" trace. Every entry is `<SDK method> — <what that call did in THIS
     // scenario>`, appended AT the call site, in the order the calls were made; an entry wrapped in
-    // parentheses is a step that is deliberately NOT an SDK call. The annotations are byte-identical in
-    // all six SDK examples — only the method reference is written in the language's own idiom — so one
-    // scenario teaches one thing whichever example a reader starts. Keep them in step when this handler
+    // parentheses is a step that is deliberately NOT an SDK call. Keep them in step when this handler
     // changes: the panel is headed "What just happened", and a list that no longer matches the code is
     // worse than a short one.
     private const string CallIdwBuild = "OAuthClient.FromConfig — builds the RP client from the saved config file: client id, secret and the registered redirect URI";
@@ -96,12 +94,12 @@ public sealed class IdentityHandlers
 
     /// <summary>
     /// Record a call on the run's "what just happened" trace through the shared, deduping implementation
-    /// (#578, standards §1) — the identity family used to add unconditionally.
+    /// (standards §1) — the identity family used to add unconditionally.
     /// </summary>
     private static void AddCall(Run run, string name) => Trace.Add(run.Calls, name);
 
     /// <summary>
-    /// Refusal when the request carries no Host header, so the browser's origin is unknown (#574). There is
+    /// Refusal when the request carries no Host header, so the browser's origin is unknown. There is
     /// NO default host: substituting one (localhost) silently sends the round-trip to a DIFFERENT origin
     /// than the browser is on — a different localStorage and a redirect URI the OAuth app never registered.
     /// </summary>
@@ -130,7 +128,7 @@ public sealed class IdentityHandlers
     public async Task SaveConfig(HttpContext ctx, int id)
     {
         if (!IsRunnable(id)) { await Web.NotFound(ctx); return; }
-        // The redirect URI is derived from THIS request's origin and from nothing else (#574). Refuse
+        // The redirect URI is derived from THIS request's origin and from nothing else. Refuse
         // rather than store a hostless URI: the suite renders this sentence on Save.
         if (string.IsNullOrWhiteSpace(ctx.Request.Host.Value))
         {
@@ -231,9 +229,9 @@ public sealed class IdentityHandlers
             }
 
             case 5: // OIDC login
-            case 6: // OIDC — continue on your phone (#431)
+            case 6: // OIDC — continue on your phone
             {
-                // The OIDC library owns PKCE + state + nonce (the point of the #314 demonstration). Its
+                // The OIDC library owns PKCE + state + nonce (the point of this scenario). Its
                 // generated `state` IS the runId, so /callback finds the run by it (contract: state == runId).
                 var oidc = OidcClientFor(id);
                 var authState = await oidc.PrepareLoginAsync();
@@ -312,7 +310,7 @@ public sealed class IdentityHandlers
         {
             if (ctx.Request.Query["enrolled"].ToString() == "true")
             {
-                // Redirect-leg enrollment outcome (#436) — nothing to exchange; record it.
+                // Redirect-leg enrollment outcome — nothing to exchange; record it.
                 run.Status = "done";
                 run.Result = new { enrolled = true };
                 AddCall(run, CallEnrolledCallback);
@@ -432,7 +430,7 @@ public sealed class IdentityHandlers
 
         var result = new Dictionary<string, object?>
         {
-            // #498: `sub` IS the share code, and there is no display name any more — it is a consented
+            // `sub` IS the share code, and there is no display name any more — it is a consented
             // `name` claim, or nothing. `attestations` is the additive proof map for verified claims.
             ["user"] = new { sub = res.Sub, share_code = res.ShareCode },
             ["mode"] = res.Mode,
@@ -509,7 +507,7 @@ public sealed class IdentityHandlers
 
     /// <summary>
     /// Whether <see cref="OAuthClientFor"/> takes the named-constructor branch. The SAME predicate decides
-    /// the client AND the trace entry, so the panel can never name a constructor that did not run (#578) —
+    /// the client AND the trace entry, so the panel can never name a constructor that did not run —
     /// the local-stack option really does build the client a different way.
     /// </summary>
     private bool UsesDefaultAuthorizeBase(int id)
@@ -518,7 +516,7 @@ public sealed class IdentityHandlers
         return baseUrl.Length == 0 || baseUrl == OAuthClient.DefaultAuthorizeUrl;
     }
 
-    /// <summary>The trace entry for the OAuth client <see cref="OAuthClientFor"/> just built (#578).</summary>
+    /// <summary>The trace entry for the OAuth client <see cref="OAuthClientFor"/> just built.</summary>
     private string IdwBuildCall(int id) => UsesDefaultAuthorizeBase(id) ? CallIdwBuild : CallIdwBuildLocal;
 
     /// <summary>Build the service data client OFF the scenario's config file (service role).</summary>
@@ -530,7 +528,7 @@ public sealed class IdentityHandlers
         return new Client(cfg, new ApiHttp(cfg, new HttpTransport(PollHttp)));
     }
 
-    /// <summary>Build the OIDC client (the #314 compliance surface) from the config file.</summary>
+    /// <summary>Build the OIDC client (the compliance surface) from the config file.</summary>
     private OidcClient OidcClientFor(int id)
     {
         using var doc = JsonDocument.Parse(File.ReadAllText(_rt.ConfigPathFor(id.ToString())));
@@ -559,7 +557,7 @@ public sealed class IdentityHandlers
 
     /// <summary>
     /// The registered redirect URI: http://{host}/callback, host = the origin the browser actually used.
-    /// Never falls back to a hardcoded host (#574) — 127.0.0.1 and localhost are DIFFERENT origins for
+    /// Never falls back to a hardcoded host — 127.0.0.1 and localhost are DIFFERENT origins for
     /// redirect matching and for browser storage alike, so a substituted default drops the developer on an
     /// origin whose localStorage never held the setup and whose URI the OAuth app never registered.
     /// </summary>
@@ -573,7 +571,7 @@ public sealed class IdentityHandlers
     /// <summary>
     /// The redirect URI recorded in the scenario's config file (used by the OIDC library) — the SAME value
     /// the authorize URL carried, so the two legs of the exchange cannot diverge. An absent/empty record
-    /// re-derives from THIS request's origin; it never substitutes a host (#574).
+    /// re-derives from THIS request's origin; it never substitutes a host.
     /// </summary>
     private string ConfigRedirectUri(int id, HttpContext ctx)
     {
@@ -601,7 +599,7 @@ public sealed class IdentityHandlers
                     arr.ValueKind == JsonValueKind.Array
             ? arr.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!)
             : Enumerable.Empty<string>();
-        // #498: a claim carries a mandatory, unique Name — the key Values and Attestations come back
+        // A claim carries a mandatory, unique Name — the key Values and Attestations come back
         // under. The demo's config lists claim TYPES, so the type doubles as the name here; a real
         // integration usually names them for its own domain ("billing_email").
         return types.Select(t => new Claim(t, t)).ToList();

@@ -367,8 +367,8 @@ public sealed class WebhookTests : IDisposable
         WebhookAuthNone = none,
     };
 
-    // Build a config from a JSON object exactly as the platform's config loader would (Config._build
-    // in Python). FromFile → Build runs the same parsing + validation, so this mirrors _build(data).
+    // Build a config from a JSON object exactly as Config.Build would. FromFile → Build runs the
+    // same parsing + validation, so this exercises that internal path directly.
     private string FullData(Action<Dictionary<string, object?>> extra)
     {
         var pem = Path.Combine(_dir, "k-auth.pem");

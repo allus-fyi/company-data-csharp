@@ -21,7 +21,7 @@
 //   * Slug catalog — RequestFieldsAsync() is fetched once + cached; its slug→type map types every
 //     value (address parses to a dictionary, photo becomes a lazy binary handle, etc.).
 //   * Binary — a value's BinaryHandle.BytesAsync() GETs the slot file endpoint and returns the file
-//     bytes. #590: that endpoint has two 200 shapes — an {"encrypted":true,"value":<wrapper>} JSON
+//     bytes. That endpoint has two 200 shapes — an {"encrypted":true,"value":<wrapper>} JSON
 //     envelope the same service-key decrypt unwraps, or the raw file bytes under the file's own
 //     Content-Type — and BinaryFetchImpl classifies which arrived so the caller never has to.
 //   * Changes feed — ProcessChangesAsync delegates to the Pump, injecting a fetch closure
@@ -72,22 +72,21 @@ public sealed class Client : IDisposable
     // public key is immutable + not a secret (fetched live, never configured).
     private readonly Dictionary<string, RSA> _pubkeyCache = new();
     /// <summary>
-    /// #344 review pass 2: <see cref="Dictionary{TKey,TValue}"/> is not thread-safe, and
+    /// <see cref="Dictionary{TKey,TValue}"/> is not thread-safe, and
     /// <see cref="InvalidatePublicKey"/> is documented as something a WEBHOOK consumer calls from its
     /// own thread — concurrently with an encryption that reads or populates this map. Every access
     /// takes this lock. It is never held across the HTTP fetch, or concurrent encryptions would
-    /// serialise behind one round-trip. (The Go SDK's equivalent race is what the review caught; the
-    /// same reasoning applies verbatim here.)
+    /// serialise behind one round-trip.
     /// </summary>
     private readonly object _pubkeyLock = new();
     /// <summary>
-    /// #344 review pass 3: a per-key GENERATION counter, bumped by every invalidation.
+    /// A per-key GENERATION counter, bumped by every invalidation.
     /// <para>Locking the dictionary alone is not enough. The fetch path is check (locked) →
     /// release → HTTP → store (locked), so an <c>InvalidatePublicKey</c> landing between the
     /// release and the store is silently undone: the pre-rotation key is written back AFTER the
     /// removal, the <c>key_rotated</c> event has already been consumed, and with no TTL the
-    /// process encrypts to the dead key for the rest of its life — the exact symptom this issue
-    /// exists to fix.</para>
+    /// process encrypts to the dead key for the rest of its life — the exact symptom this design
+    /// exists to prevent.</para>
     /// <para>The fetch snapshots the generation before releasing the lock and stores only if it
     /// is still current; otherwise it discards its result and the next caller refetches.</para>
     /// </summary>
@@ -116,7 +115,7 @@ public sealed class Client : IDisposable
 
     private TwoFactorClient? _twoFactor;
 
-    /// <summary>#436 2FA-by-allme — the relying-party challenge API (<c>TwoFactor.ChallengeAsync</c> / <c>.ResultAsync</c>).</summary>
+    /// <summary>2FA-by-allme — the relying-party challenge API (<c>TwoFactor.ChallengeAsync</c> / <c>.ResultAsync</c>).</summary>
     public TwoFactorClient TwoFactor => _twoFactor ??= new TwoFactorClient(_http, _sleep);
 
     // ── constructors (config-only keys) ────────────────────────────────────────────────────────
@@ -133,7 +132,7 @@ public sealed class Client : IDisposable
 
     /// <summary>
     /// Fetch a company-facing binary file endpoint and classify its response.
-    /// <para>#590 — the endpoint has TWO 200 shapes and which one arrives is not the company's to
+    /// <para>The endpoint has TWO 200 shapes and which one arrives is not the company's to
     /// predict: a person whose source field is PRIVATE yields <c>application/json</c>
     /// <c>{"encrypted":true,"value":&lt;wrapper&gt;}</c>, a person whose field is not yields the file's
     /// own Content-Type and the bytes themselves. The decision is made on <c>Content-Type</c> and never
@@ -344,7 +343,7 @@ public sealed class Client : IDisposable
     }
 
     /// <summary>
-    /// #344 — drop a person's cached RSA public key, by share code.
+    /// Drop a person's cached RSA public key, by share code.
     /// </summary>
     /// <remarks>
     /// A public key is immutable, so caching one is safe until the person rotates it. Persons learn
@@ -369,9 +368,9 @@ public sealed class Client : IDisposable
 
     private Change DecryptChange(Node ev)
     {
-        // #344: the feed is a service's only rotation signal. Deliberately eventual — nothing
+        // The feed is a service's only rotation signal. Deliberately eventual — nothing
         // rejects a document encrypted to a stale key, so a window remains until this is drained.
-        // #344: the pull feed names it `event`; a raw webhook body names it `action` (and on
+        // The pull feed names it `event`; a raw webhook body names it `action` (and on
         // document rows `action` carries signed|accepted|cancelled instead) — so match either key.
         if (ev.Kind == NodeKind.Object
             && (ev.Get("event").AsString() == "key_rotated" || ev.Get("action").AsString() == "key_rotated"))
@@ -674,7 +673,7 @@ public sealed class Client : IDisposable
     }
 
     /// <summary>
-    /// #491 gap 2: download a document's file BYTES. <see cref="DocumentAsync"/> returns metadata only.
+    /// Download a document's file BYTES. <see cref="DocumentAsync"/> returns metadata only.
     /// This GETs <c>/documents/{id}/file</c> and branches on the document's storage mode (server
     /// contract):
     /// <list type="bullet">
@@ -726,7 +725,8 @@ public sealed class Client : IDisposable
         }
     }
 
-    /// <summary>PHP-style loose truthiness for the <c>encrypted</c> flag's JSON value.</summary>
+    /// <summary>Loose truthiness for the <c>encrypted</c> flag's JSON value — 0, "0", null and empty
+    /// collections are falsy; everything else is truthy.</summary>
     private static bool IsTruthy(JsonElement el) => el.ValueKind switch
     {
         JsonValueKind.True => true,
@@ -835,7 +835,7 @@ public sealed class Client : IDisposable
     }
 
     /// <summary>
-    /// #491 gap 1: a completed run's DECRYPTED answers as <c>{slug: plaintext}</c>. Decrypts the
+    /// A completed run's DECRYPTED answers as <c>{slug: plaintext}</c>. Decrypts the
     /// company's service-key answer copies of an already-fetched run — the public accessor for a
     /// finished run's answers, since the private <c>DecryptRunAnswers</c> it wraps is otherwise
     /// reached only inside <see cref="ProcessFlowRunAsync"/>, which returns an already-completed run
@@ -844,7 +844,7 @@ public sealed class Client : IDisposable
     public Dictionary<string, object?> FlowRunAnswers(FlowRun run) => DecryptRunAnswers(run);
 
     /// <summary>
-    /// #491 gap 2: download the company's OWN copy of a run's generated flow contract — the PLAINTEXT
+    /// Download the company's OWN copy of a run's generated flow contract — the PLAINTEXT
     /// file bytes. GETs <c>/flow-runs/{runId}/document/file</c>, which serves the company-party copy
     /// encrypted to the SERVICE key (unlike <see cref="DocumentFileAsync"/>'s recipient-targeted copy),
     /// so the same <see cref="BinaryHandle"/> the slot-file download uses decrypts it → the
@@ -858,7 +858,7 @@ public sealed class Client : IDisposable
     }
 
     /// <summary>
-    /// #491 gap 3: this client's OWN identity from <c>GET /api/company-data/whoami</c>. The COMPANY
+    /// This client's OWN identity from <c>GET /api/company-data/whoami</c>. The COMPANY
     /// party of a <see cref="TriggerFlowRunAsync"/> binding must bind to <c>CompanyUserId</c> (the
     /// person party's user_id comes from the connection), so without this the company-side binding
     /// was unconstructible through the SDK.
@@ -939,7 +939,7 @@ public sealed class Client : IDisposable
         foreach (var (k, v) in fill) full[k] = v;
         var svcPub = ServicePublicKey();
 
-        // #302: validate each freshly-typed answer against its field type from the pinned
+        // Validate each freshly-typed answer against its field type from the pinned
         // definition, BEFORE encryption. Skip when the type can't be resolved.
         foreach (var (slug, val) in fill)
         {
@@ -1143,7 +1143,7 @@ public sealed class Client : IDisposable
     /// Resolve a field element's <c>field_type</c> from the pinned flow definition by scanning
     /// every node's elements for a <c>kind:"field"</c> element with the given slug. Returns null
     /// when the slug is not a field element (or elements are absent) — callers then SKIP
-    /// validation rather than invent a type (#302).
+    /// validation rather than invent a type.
     /// </summary>
     private static string? FieldTypeForSlug(Node definition, string slug)
     {

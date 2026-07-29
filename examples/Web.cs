@@ -19,20 +19,19 @@ public static class Web
     }
 
     /// <summary>
-    /// The contract's FAILURE envelope (#583):
+    /// The contract's FAILURE envelope:
     /// <c>{"error": "&lt;token&gt; — &lt;reason&gt;", "message": "&lt;reason&gt;"}</c>.
     /// <para>
-    /// The suite's shared client raises <c>body.error</c> VERBATIM and ignores every other key
-    /// (<c>api.js</c>: <c>throw new Error(body.error || "start failed (…)")</c>), so a bare token in
-    /// <c>error</c> reaches the developer as one uninformative word and the REASON — which the backend
-    /// has right there — is dropped. That is the swallowed failure of standards.html §9: a failure
-    /// converted into something indistinguishable from any other failure. The token is kept and the
-    /// reason appended in the shape this contract already uses for exactly this (<c>no_origin — …</c>,
-    /// #574); <c>message</c> keeps the bare reason for a programmatic reader.
+    /// The suite's shared frontend client raises <c>body.error</c> VERBATIM and ignores every other key,
+    /// so a bare token in <c>error</c> reaches the developer as one uninformative word and the REASON —
+    /// which the backend has right there — is dropped. That is the swallowed failure of standards.html
+    /// §9: a failure converted into something indistinguishable from any other failure. The token is kept
+    /// and the reason appended in the shape this contract already uses for exactly this
+    /// (<c>no_origin — …</c>); <c>message</c> keeps the bare reason for a programmatic reader.
     /// </para>
     /// <para>
     /// NOT used for the token-only refusals the suite handles by STATUS rather than body —
-    /// <c>409 not_configured</c> (<c>startScenario</c> maps the 409 before reading the body) and
+    /// <c>409 not_configured</c> (callers switch on the status directly, without needing the body) and
     /// <c>404 not_found</c>.
     /// </para>
     /// </summary>

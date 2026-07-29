@@ -1,8 +1,8 @@
-// Field-type value validation — issue #302. Pure + i18n-free. Data-driven: each type maps to a
+// Field-type value validation. Pure + i18n-free. Data-driven: each type maps to a
 // "kind"; structured types map each sub-field to its own sub-rule (§2b), reusing the same kinds.
 // Validate the PLAINTEXT before encryption, at input surfaces only (never on share/propagate).
-// Kept byte-aligned across web / allus / iOS / Android / the 6 SDKs by
-// docs/contract-field-validation-vector.json. Reference: frontend/src/fieldValidation.js. Spec:
+// Kept byte-aligned with the pinned shared vector:
+// docs/contract-field-validation-vector.json. Spec:
 // docs/superpowers/specs/2026-07-15-field-type-validation-design.html
 //
 // Contract: FieldValidation.IsValid(type, value) -> bool. Empty value = valid (required is the
@@ -14,7 +14,7 @@ using System.Text.RegularExpressions;
 
 namespace Allus.CompanyData;
 
-/// <summary>Pure field-type value validation (issue #302), pinned by the shared vector.</summary>
+/// <summary>Pure field-type value validation, pinned by the shared vector.</summary>
 public static class FieldValidation
 {
     private static readonly Regex EmailRe = new(@"^[^\s@]+@[^\s@]+\.[^\s@]+$");
@@ -37,7 +37,7 @@ public static class FieldValidation
 
     private static readonly string[] Gender = { "Male", "Female", "Non-binary", "Prefer not to say" };
 
-    // #303: country/nationality store an ISO 3166-1 alpha-2 code; address state = USPS 2-letter code.
+    // Country/nationality store an ISO 3166-1 alpha-2 code; address state = USPS 2-letter code.
     // The lists come from the generated country data (do NOT inline them — they would rot).
     private static readonly HashSet<string> CountrySet = new(CountryData.CountryCodes);
     private static readonly HashSet<string> UsStateSet = new(CountryData.UsStateCodes);
@@ -221,10 +221,10 @@ public static class FieldValidation
     public static string? Error(string fieldType, string? value) =>
         IsValid(fieldType, value) ? null : fieldType;
 
-    /// <summary>True if <paramref name="code"/> is an assigned ISO 3166-1 alpha-2 country code (#303).</summary>
+    /// <summary>True if <paramref name="code"/> is an assigned ISO 3166-1 alpha-2 country code.</summary>
     public static bool IsValidCountryCode(string? code) => code is not null && CountrySet.Contains(code);
 
-    /// <summary>The ITU E.164 dial code (digits only, no <c>+</c>) for a country code, or null (#303).</summary>
+    /// <summary>The ITU E.164 dial code (digits only, no <c>+</c>) for a country code, or null.</summary>
     public static string? DialCodeFor(string? code) =>
         code is not null && CountryData.DialCodes.TryGetValue(code, out var dial) ? dial : null;
 }

@@ -1,7 +1,7 @@
 // Crash-safe changes-pump tests. Drives the pump with a fake in-memory changes
 // source returning canned CIPHERTEXT events (reusing the shared decryption vector's real
 // {_enc:1,...} wrapper as a value) and a decrypt callable running the real crypto core. Nothing
-// here touches the live API. Mirrors the Python reference's full §6 coverage incl. the four
+// here touches the live API. Exercises the pump's full durability guarantees, including its four
 // durability caveats.
 
 using System.Security.Cryptography;

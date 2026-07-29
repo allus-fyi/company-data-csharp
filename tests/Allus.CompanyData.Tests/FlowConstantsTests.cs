@@ -1,6 +1,5 @@
-// FlowConstants (computed variables) parity — issue #79. Every case in the shared
-// contract-flow-constants-vector.json must pass; the same vector pins the PHP reference + the
-// python/ts/go/iOS/Android ports. Mirrors FlowConditionTests' directory-walk vector finder.
+// FlowConstants (computed variables) parity. Every case in the shared
+// contract-flow-constants-vector.json must pass. Mirrors FlowConditionTests' directory-walk vector finder.
 
 using System.Text.Json;
 using Allus.CompanyData;

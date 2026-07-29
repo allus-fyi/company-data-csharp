@@ -181,7 +181,7 @@ public sealed class ApiHttp
     /// <summary>
     /// GET <paramref name="path"/> returning the whole 2xx <see cref="HttpResult"/> — status, headers
     /// AND raw body, with no parse.
-    /// <para>#590: the company-facing binary file endpoints have two 200 shapes (a JSON wrapper for an
+    /// <para>The company-facing binary file endpoints have two 200 shapes (a JSON wrapper for an
     /// encrypted answer, raw file bytes for a plaintext one) that are told apart by
     /// <c>Content-Type</c>, and both carry an <c>X-Allus-Content-Sha256</c> digest header. Neither
     /// <see cref="GetAsync"/> (which parses) nor <see cref="GetRawAsync"/> (which drops the headers)
@@ -301,7 +301,7 @@ public sealed class ApiHttp
             if (status == 429)
             {
                 var (errorKey, message, _) = ExtractError(resp);
-                // #481: a pending-cap 429 means the caller already holds the maximum concurrent 2FA
+                // A pending-cap 429 means the caller already holds the maximum concurrent 2FA
                 // challenges — a retry can never clear that, so surface it immediately as an
                 // ApiException instead of the blind Retry-After backoff every other 429 gets.
                 if (errorKey == "twofa.pending_cap")
@@ -351,7 +351,7 @@ public sealed class ApiHttp
         new Dictionary<string, object?>();
 
     /// <summary>
-    /// Pull <c>error_key</c> + a message out of a non-2xx body (JSON or XML). #590: everything BESIDE
+    /// Pull <c>error_key</c> + a message out of a non-2xx body (JSON or XML). Everything BESIDE
     /// the key and the message travels on as <c>Details</c>, so a body that carries actionable data (a
     /// 410 <c>file_expired</c>'s <c>content_sha256</c> + <c>expired_at</c>) is readable without a
     /// bespoke exception type per response.

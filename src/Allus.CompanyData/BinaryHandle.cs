@@ -4,7 +4,7 @@
 // value_url (never the source field). .BytesAsync() and .SaveAsync() GET that URL and return the
 // FILE BYTES either way — the caller never has to know which of the two response shapes arrived.
 //
-// #590 — THERE ARE TWO SHAPES, AND WHICH ONE ARRIVES IS THE PERSON'S CHOICE, NOT THE COMPANY'S.
+// THERE ARE TWO SHAPES, AND WHICH ONE ARRIVES IS THE PERSON'S CHOICE, NOT THE COMPANY'S.
 // Whether the person's source field is private decides it, they can change it at any time, and
 // nothing in the API announces it in advance:
 //
@@ -53,7 +53,7 @@ public sealed class BinaryHandle
 
     /// <summary>
     /// Build a lazy handle: <paramref name="valueUrl"/> is the slot file endpoint;
-    /// <paramref name="fetch"/> GETs it and reports which of the two 200 shapes arrived (#590);
+    /// <paramref name="fetch"/> GETs it and reports which of the two 200 shapes arrived;
     /// <paramref name="decrypt"/> turns an encrypted shape's wrapper into the decrypted envelope
     /// string (closes over the service private key) and is never called for a plaintext one.
     /// A null <paramref name="valueUrl"/> = an empty handle.
@@ -175,7 +175,7 @@ public sealed class BinaryHandle
     }
 
     /// <summary>
-    /// Fetch (if needed), decrypt, and return the decoded primary file bytes. #590: a plaintext-shaped
+    /// Fetch (if needed), decrypt, and return the decoded primary file bytes. A plaintext-shaped
     /// answer short-circuits here — its body already IS the file, so there is no envelope to parse.
     /// </summary>
     public async Task<byte[]> BytesAsync(CancellationToken ct = default)

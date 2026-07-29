@@ -1,4 +1,4 @@
-// Pure port of the platform FlowConditionEvaluator (A-spec §4) — pinned to the shared
+// Contract-flow condition evaluator (A-spec §4) — pinned to the shared
 // contract-flow-condition-vector.json.
 //
 // A condition is one of:
@@ -24,7 +24,7 @@ namespace Allus.CompanyData;
 
 /// <summary>
 /// The contract-flow condition evaluator — the single source of routing / show-if /
-/// option-availability, byte-identical to the platform PHP reference and the other SDK ports.
+/// option-availability, pinned to the shared vector (see file header).
 /// </summary>
 public static class FlowCondition
 {
@@ -59,7 +59,7 @@ public static class FlowCondition
             case "empty": return !Answered(val);
             case "in": return InList(targetNode, val);
             case "nin": return !InList(targetNode, val);
-            // #102 substring ops (text): contains needs an answer (like in); not_contains is
+            // Substring ops (text): contains needs an answer (like in); not_contains is
             // true when unanswered (like nin). Case-sensitive; empty needle counts as contained.
             case "contains": return Answered(val) && Str(val).Contains(Str(ScalarOf(targetNode)));
             case "not_contains": return !(Answered(val) && Str(val).Contains(Str(ScalarOf(targetNode))));
@@ -172,7 +172,7 @@ public static class FlowCondition
         _ => string.CompareOrdinal(a, b) >= 0, // ge
     };
 
-    // ── Flow constants (computed variables) — issue #79. Pure; extends the evaluator above. ──
+    // ── Flow constants (computed variables). Pure; extends the evaluator above. ──
     // ComputeConstants materialises each constant's value into a NEW slug→value map (answers +
     // {key:value}) in topological (dependency) order, so the evaluator's leaf {field:<constKey>}
     // resolves a constant with zero change. null propagates: an unresolved operand yields null; a

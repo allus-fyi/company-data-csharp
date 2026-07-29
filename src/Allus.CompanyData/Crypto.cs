@@ -294,7 +294,7 @@ public static class Crypto
         }
     }
 
-    /// <summary>#311: true iff sha256(salt ‖ plaintext) == expectedHash (hex). Consumers recompute
+    /// <summary>True iff sha256(salt ‖ plaintext) == expectedHash (hex). Consumers recompute
     /// this from the plaintext they just decrypted and trust the verified flag ONLY on a match.</summary>
     public static bool HashMatches(string salt, string expectedHash, string plaintext)
     {

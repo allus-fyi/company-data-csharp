@@ -51,8 +51,8 @@ public class ApiException : Exception
 
     /// <summary>
     /// The error body's remaining fields, verbatim (empty when the body carried none).
-    /// <para>#590 added the first response that carries actionable data BESIDE the key: a 410
-    /// <c>company_data.file_expired</c> returns the expired answer's <c>content_sha256</c> and
+    /// <para>A 410 <c>company_data.file_expired</c> is the first response that carries actionable data
+    /// BESIDE the key: it returns the expired answer's <c>content_sha256</c> and
     /// <c>expired_at</c>, so a consumer can record that its archived copy is now the only one and
     /// still prove what it holds. Generic rather than a bespoke subclass — every error body's extra
     /// fields become reachable, and no future one needs a new exception type to be readable.</para>
@@ -116,7 +116,7 @@ public class WebhookException : Exception
 }
 
 /// <summary>
-/// A freshly-typed value failed its field type's shape/format check (#302) before encryption.
+/// A freshly-typed value failed its field type's shape/format check before encryption.
 /// Names the offending <see cref="Slug"/> and the resolved <see cref="FieldType"/>. Client
 /// validation is UX, never a security boundary.
 /// </summary>
