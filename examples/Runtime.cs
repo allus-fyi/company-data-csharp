@@ -22,6 +22,8 @@ public interface IRun
 ///   <item>config/keys/&lt;sha1&gt;.pem — private-key file(s) a config references by path (0600)</item>
 ///   <item>runs/{runId}.json — one run's cross-request state (30-min TTL, lazy sweep)</item>
 ///   <item>webhook-route.json — the SINGLE active company-data webhook run {webhookId, runId}</item>
+///   <item>state.json — the setup snapshot POSTed to /api/state, held verbatim as OPAQUE cold storage:
+///   never parsed here, never used to run anything</item>
 ///   <item>cache/ — the SDK pump's buffer + dead-letter dir (Config.cache_dir), wiped by Clear</item>
 /// </list>
 /// Runs are stored + read per family via the generic <see cref="WriteRun{T}"/> / <see cref="ReadRun{T}"/>;
@@ -38,6 +40,7 @@ public sealed class Runtime
     public string ConfigKeysDir { get; }
     public string CacheDir { get; }
     public string RoutePath { get; }
+    public string StatePath { get; }
 
     private static readonly JsonSerializerOptions RunJson = new()
     {
@@ -59,6 +62,7 @@ public sealed class Runtime
         // "writes only under .runtime/" property holds.
         CacheDir = Path.Combine(RuntimeDir, "cache");
         RoutePath = Path.Combine(RuntimeDir, "webhook-route.json");
+        StatePath = Path.Combine(RuntimeDir, "state.json");
     }
 
     public void EnsureDirs()
@@ -248,6 +252,30 @@ public sealed class Runtime
 
     public void ClearRoute() => TryDelete(RoutePath);
 
+    // ── the setup snapshot (POST/GET /api/state) ──────────────────────────────────
+
+    /// <summary>
+    /// Store the setup snapshot the request carried, VERBATIM. The bytes are OPAQUE here — never parsed,
+    /// never inspected, never used to run anything — so nothing in this class constrains what they may
+    /// contain, and an empty body is a snapshot like any other. They stay <c>byte[]</c> end to end:
+    /// decoding to a string and back would re-encode content this store is not allowed to interpret.
+    /// Carries no TTL (it is setup, not a run); removed by a global clear or the startup wipe.
+    /// </summary>
+    public void WriteState(byte[] blob)
+    {
+        EnsureDirs();
+        AtomicWrite(StatePath, blob);
+    }
+
+    /// <summary>
+    /// The stored snapshot's bytes, or null when NO snapshot file exists — the file's presence is the
+    /// whole of the answer, since judging the content would be the inspection this store does not do. A
+    /// file that exists but cannot be read throws, because that is a fault rather than an absence.
+    /// </summary>
+    public byte[]? ReadState() => File.Exists(StatePath) ? File.ReadAllBytes(StatePath) : null;
+
+    public void ClearState() => TryDelete(StatePath);
+
     // ── clear ─────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -274,7 +302,11 @@ public sealed class Runtime
         EnsureDirs();
     }
 
-    /// <summary>Global clear: wipe all runs, the config tree (configs, metas, keys), the route + cache.</summary>
+    /// <summary>
+    /// Global clear: wipe all runs, the config tree (configs, metas, keys), the route + cache, and the
+    /// saved setup snapshot. The snapshot goes too because it can hold the same credentials the config
+    /// tree does — a clear that left it behind would leave those sitting on disk.
+    /// </summary>
     public void ClearAll()
     {
         if (Directory.Exists(RunsDir))
@@ -282,6 +314,7 @@ public sealed class Runtime
         RmTree(ConfigDir);
         RmTree(CacheDir);
         ClearRoute();
+        ClearState();
         EnsureDirs();
     }
 
@@ -323,8 +356,14 @@ public sealed class Runtime
     /// <summary>Write-temp + atomic rename on the same filesystem (crash hygiene: no partial reads).</summary>
     private static void AtomicWrite(string finalPath, string contents)
     {
+        AtomicWrite(finalPath, System.Text.Encoding.UTF8.GetBytes(contents));
+    }
+
+    /// <summary>Write-temp + rename for content that must land as the exact bytes given.</summary>
+    private static void AtomicWrite(string finalPath, byte[] contents)
+    {
         var tmp = $"{finalPath}.{Convert.ToHexString(RandomNumberGenerator.GetBytes(4))}.tmp";
-        File.WriteAllText(tmp, contents);
+        File.WriteAllBytes(tmp, contents);
         File.Move(tmp, finalPath, overwrite: true);
     }
 

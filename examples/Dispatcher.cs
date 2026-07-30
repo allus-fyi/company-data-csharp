@@ -93,6 +93,22 @@ public sealed class Dispatcher
         await Web.WriteOk(ctx);
     }
 
+    // ── the setup snapshot (POST/GET /api/state) ─────────────────────────────────
+
+    /// <summary>POST /api/state — the setup snapshot, stored verbatim; its bytes are never inspected.</summary>
+    public async Task SaveState(HttpContext ctx)
+    {
+        _rt.WriteState(await Web.ReadRawBodyBytes(ctx));
+        await Web.WriteOk(ctx);
+    }
+
+    /// <summary>GET /api/state — handed back exactly as stored; no snapshot file → 404 not_found.</summary>
+    public Task RestoreState(HttpContext ctx)
+    {
+        var blob = _rt.ReadState();
+        return blob is null ? Web.NotFound(ctx) : Web.WriteRawJson(ctx, blob);
+    }
+
     // ── GET /api/runs/{runId} — routed by the run's recorded scenario ────────────
 
     public Task RunStatus(HttpContext ctx, string runId)

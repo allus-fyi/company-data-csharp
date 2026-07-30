@@ -130,6 +130,8 @@ app.MapPost("/api/scenarios/{id}/enroll", (HttpContext ctx, string id) => dispat
 app.MapPost("/api/scenarios/{id}/clear", (HttpContext ctx, string id) => dispatcher.ClearScenario(ctx, id));
 app.MapGet("/api/runs/{runId}", (HttpContext ctx, string runId) => dispatcher.RunStatus(ctx, runId));
 app.MapPost("/api/clear", (HttpContext ctx) => dispatcher.ClearAll(ctx));
+app.MapPost("/api/state", (HttpContext ctx) => dispatcher.SaveState(ctx));   // store the setup snapshot
+app.MapGet("/api/state", (HttpContext ctx) => dispatcher.RestoreState(ctx)); // hand it back as stored
 // PUBLIC per-family endpoints (not under /api/).
 app.MapGet("/callback", (HttpContext ctx) => dispatcher.Callback(ctx));   // identity OAuth/OIDC redirect leg
 app.MapPost("/webhook", (HttpContext ctx) => dispatcher.Webhook(ctx));    // company-data inbound delivery

@@ -51,6 +51,18 @@ public static class Web
     public static string ReasonOf(Exception e) =>
         string.IsNullOrWhiteSpace(e.Message) ? e.GetType().FullName ?? "unknown error" : e.Message.Trim();
 
+    /// <summary>
+    /// Serve a JSON document that is already encoded, byte for byte — the stored setup snapshot. The
+    /// bytes are passed through as they are because parsing and re-serialising them here, or decoding
+    /// them to a string and back, would rewrite content this server is not allowed to interpret.
+    /// </summary>
+    public static async Task WriteRawJson(HttpContext ctx, byte[] blob, int status = 200)
+    {
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        await ctx.Response.Body.WriteAsync(blob);
+    }
+
     public static async Task WriteText(HttpContext ctx, string body, int status = 200)
     {
         ctx.Response.StatusCode = status;
@@ -85,6 +97,14 @@ public static class Web
     {
         using var reader = new StreamReader(ctx.Request.Body);
         return await reader.ReadToEndAsync();
+    }
+
+    /// <summary>The request body as the exact bytes sent — for content that must not be re-encoded.</summary>
+    public static async Task<byte[]> ReadRawBodyBytes(HttpContext ctx)
+    {
+        using var buffer = new MemoryStream();
+        await ctx.Request.Body.CopyToAsync(buffer);
+        return buffer.ToArray();
     }
 
     /// <summary>Request headers as a case-insensitive name → value map (for the SDK webhook verify/parse).</summary>
