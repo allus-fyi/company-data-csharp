@@ -77,6 +77,16 @@ public sealed class SignInResult
     public string? Mode { get; init; }
     public bool TwoFactor { get; init; }
     public IReadOnlyDictionary<string, string> Values { get; init; } = new Dictionary<string, string>();
+
+    /// <summary>
+    /// Claim name → the RAW app-key ciphertext wrapper <see cref="Values"/> was decrypted from — an
+    /// ADDITIVE sibling of <see cref="Values"/>, keyed the same way, exactly as delivered by
+    /// userinfo. Lets a caller demonstrate that a plaintext value really came from encrypted
+    /// delivery. Empty for a mode/claim carrying no ciphertext (signin mode, or plaintext delivery)
+    /// — that absence is the honest answer, never a placeholder.
+    /// </summary>
+    public IReadOnlyDictionary<string, JsonElement> ValuesCipher { get; init; } = new Dictionary<string, JsonElement>();
+
     public IReadOnlyDictionary<string, Attestation> Attestations { get; init; } = new Dictionary<string, Attestation>();
 }
 
@@ -212,10 +222,13 @@ public sealed class OAuthClient
             throw new AuthException("token exchange returned no access_token");
         var info = await UserinfoAsync(accessToken!, ct).ConfigureAwait(false);
         var values = new Dictionary<string, string>();
+        var valuesCipher = new Dictionary<string, JsonElement>();
         var attestations = new Dictionary<string, Attestation>();
         if (info.TryGetProperty("values", out var vals) && vals.ValueKind == JsonValueKind.Object)
         {
             values = DecryptValues(vals);
+            foreach (var prop in vals.EnumerateObject())
+                valuesCipher[prop.Name] = prop.Value.Clone();
             if (info.TryGetProperty("values_attestation", out var att) && att.ValueKind == JsonValueKind.Object)
                 attestations = DecryptAttestations(att, values);
         }
@@ -226,6 +239,7 @@ public sealed class OAuthClient
             Mode = Str(info, "mode") ?? Str(token, "mode"),
             TwoFactor = info.TryGetProperty("two_factor", out var tf) && tf.ValueKind == JsonValueKind.True,
             Values = values,
+            ValuesCipher = valuesCipher,
             Attestations = attestations,
         };
     }

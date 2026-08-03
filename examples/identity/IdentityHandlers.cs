@@ -445,6 +445,9 @@ public sealed class IdentityHandlers
             ["mode"] = res.Mode,
             ["two_factor"] = res.TwoFactor,
             ["values"] = res.Values,
+            // The raw app-key ciphertext each decrypted value above came from — pairs with
+            // "values" by claim name so the panel can show a decrypt actually ran on real bytes.
+            ["values_cipher"] = res.ValuesCipher,
             ["attestations"] = res.Attestations,
         };
 
