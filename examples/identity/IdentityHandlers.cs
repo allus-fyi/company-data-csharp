@@ -63,13 +63,10 @@ public sealed class IdentityHandlers
     private static readonly HashSet<int> OAuthUrlScenarios = new() { 1, 2, 3, 4, 8 }; // build a consent URL
 
     /// <summary>
-    /// Scenarios whose CompleteSignInAsync response can carry claim values (userinfo "values" non-empty)
-    /// and therefore need the OAuth app private key configured to decrypt them: mode one_time and mode
-    /// connect, both delivered as app-key ciphertext through userinfo. Mode signin (scenarios 1, 2) never
-    /// carries values; scenario 8 never calls this leg at all; scenario 5 runs the OIDC library instead
-    /// of this SDK's decrypt path.
+    /// Scenarios that persist the OAuth app private key + passphrase, for <see cref="CompleteOidc"/>
+    /// and <see cref="OAuthClient.CompleteSignInAsync"/> to decrypt userinfo values with.
     /// </summary>
-    private static readonly HashSet<int> ClaimValueScenarios = new() { 3, 4 };
+    private static readonly HashSet<int> ClaimValueScenarios = new() { 3, 4, 5 };
 
     private const string DefaultApiUrl = "https://api.allme.fyi";
     private static readonly string DefaultAuthorizeBase = OAuthClient.DefaultAuthorizeUrl; // https://web.allme.fyi/auth
@@ -100,6 +97,7 @@ public sealed class IdentityHandlers
     private const string CallWaitResult = "TwoFactorClient.WaitForResultAsync — polls GET /api/service-2fa/challenges/{id} until the status leaves pending: approved, denied, expired or revoked (one 2s-bounded call per browser poll; the first terminal read burns the result)";
     private const string CallOidcPrepare = "(oidc) OidcClient.PrepareLoginAsync — discovery and the authorization URL in one library call (scope openid profile email, PKCE S256, nonce, state = this run id)";
     private const string CallOidcComplete = "(oidc) OidcClient.ProcessResponseAsync — exchanges the code at the discovered token endpoint (client_secret_post + PKCE verifier), then verifies the id_token against the JWKS: signature, issuer, audience and nonce; the claims shown are that verified token's";
+    private const string CallOidcUserinfo = "OAuthClient.ResolveUserinfoAsync — reads GET /api/oauth/userinfo with the OIDC access token and decrypts every claim value and attestation with the OAuth app private key, for values that never reach the id_token regardless of delivery mode";
 
     /// <summary>
     /// Record a call on the run's "what just happened" trace through the shared, deduping implementation
@@ -328,6 +326,14 @@ public sealed class IdentityHandlers
             {
                 run = id is 5 ? await CompleteOidc(run, ctx) : await CompleteSignin(run, code);
             }
+            else if (ctx.Request.Query["error"].ToString() is { Length: > 0 } oauthErr)
+            {
+                // The authorize step can redirect here with an OAuth error instead of a code. Name
+                // it rather than falling through to the generic "missing code" message below.
+                var desc = ctx.Request.Query["error_description"].ToString();
+                run.Status = "failed";
+                run.Error = desc.Length > 0 ? $"{oauthErr}: {desc}" : oauthErr;
+            }
             else
             {
                 run.Status = "failed";
@@ -476,16 +482,21 @@ public sealed class IdentityHandlers
         return run;
     }
 
-    /// <summary>Complete an OIDC sign-in (scenario 5) via the OIDC library — id_token verified.</summary>
+    /// <summary>
+    /// Complete an OIDC sign-in (scenario 5) via the OIDC library — id_token verified. Additionally
+    /// resolves userinfo through <see cref="OAuthClient.ResolveUserinfoAsync"/> with the access
+    /// token the library already obtained.
+    /// </summary>
     private async Task<Run> CompleteOidc(Run run, HttpContext ctx)
     {
-        var oidc = OidcClientFor(run.Scenario);
+        var id = run.Scenario;
+        var oidc = OidcClientFor(id);
         // Sessionless: rebuild the authorize state the library needs from the run stash.
         var authState = new AuthorizeState
         {
             State = run.State!,
             CodeVerifier = run.Verifier ?? "",
-            RedirectUri = run.RedirectUri ?? ConfigRedirectUri(run.Scenario, ctx),
+            RedirectUri = run.RedirectUri ?? ConfigRedirectUri(id, ctx),
         };
         var data = ctx.Request.QueryString.Value?.TrimStart('?') ?? "";
         AddCall(run, CallOidcComplete);
@@ -495,8 +506,46 @@ public sealed class IdentityHandlers
 
         var claims = result.User?.Claims.ToDictionary(c => c.Type, c => (object?)c.Value)
                      ?? new Dictionary<string, object?>();
+
+        var resultOut = new Dictionary<string, object?>
+        {
+            ["claims"] = claims,
+            ["values"] = new Dictionary<string, string?>(),
+            ["values_cipher"] = new Dictionary<string, object?>(),
+            ["attestations"] = new Dictionary<string, object?>(),
+            ["values_gap"] = null,
+        };
+
+        var accessToken = result.AccessToken ?? "";
+        if (accessToken.Length > 0)
+        {
+            AddCall(run, IdwBuildCall(id));
+            var oauth = OAuthClientFor(id);
+            AddCall(run, CallOidcUserinfo);
+            try
+            {
+                var resolved = await oauth.ResolveUserinfoAsync(accessToken);
+                var values = new Dictionary<string, string?>(resolved.Values!);
+                // A `verified: false` attestation is a MISMATCH between the delivered value and
+                // what was verified — the value must be rejected, never shown as though it
+                // answered the claim.
+                foreach (var (slug, attestation) in resolved.Attestations)
+                {
+                    if (!attestation.Verified)
+                        values.Remove(slug);
+                }
+                resultOut["values"] = values;
+                resultOut["values_cipher"] = resolved.ValuesCipher;
+                resultOut["attestations"] = resolved.Attestations;
+            }
+            catch (ConfigException e)
+            {
+                resultOut["values_gap"] = $"userinfo carried claim value(s) that could not be decrypted: {e.Message}";
+            }
+        }
+
         run.Status = "done";
-        run.Result = new { claims };
+        run.Result = resultOut;
         return run;
     }
 

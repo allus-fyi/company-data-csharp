@@ -220,7 +220,24 @@ public sealed class OAuthClient
         var accessToken = Str(token, "access_token");
         if (string.IsNullOrEmpty(accessToken))
             throw new AuthException("token exchange returned no access_token");
-        var info = await UserinfoAsync(accessToken!, ct).ConfigureAwait(false);
+        return await ResolveUserinfoAsync(accessToken!, Str(token, "mode"), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Read + decrypt userinfo for an access token ALREADY held — the second half of
+    /// <see cref="CompleteSignInAsync"/>, split out so a caller that obtained its access token
+    /// through its own separate exchange can still resolve and decrypt the claim values.
+    /// Config-only key handling still holds — the caller passes no key/passphrase, only the token
+    /// it already has; the private key is read from <see cref="Config"/> exactly as
+    /// <see cref="CompleteSignInAsync"/> does.
+    ///
+    /// <para>Re-exchanging the code here would be wrong (a second exchange either mints a second
+    /// grant or fails outright), so this method never does the exchange — only the read +
+    /// decrypt.</para>
+    /// </summary>
+    public async Task<SignInResult> ResolveUserinfoAsync(string accessToken, string? fallbackMode = null, CancellationToken ct = default)
+    {
+        var info = await UserinfoAsync(accessToken, ct).ConfigureAwait(false);
         var values = new Dictionary<string, string>();
         var valuesCipher = new Dictionary<string, JsonElement>();
         var attestations = new Dictionary<string, Attestation>();
@@ -236,7 +253,7 @@ public sealed class OAuthClient
         {
             Sub = Str(info, "sub"),
             ShareCode = Str(info, "share_code"),
-            Mode = Str(info, "mode") ?? Str(token, "mode"),
+            Mode = Str(info, "mode") ?? fallbackMode,
             TwoFactor = info.TryGetProperty("two_factor", out var tf) && tf.ValueKind == JsonValueKind.True,
             Values = values,
             ValuesCipher = valuesCipher,
