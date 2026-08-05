@@ -170,3 +170,21 @@ materializes both JSON and XML bodies into a wire-format-agnostic `Node` tree (a
 the type returned by `client.DeadLetters()`), so the model layer is identical for
 either wire format. `Node` exposes `Get(key)`, `AsString()`, `AsList()`,
 `AsObject()`, and `ToObjectGraph()`.
+
+## Share codes — what you may send, what you always receive
+
+A profile can carry a second, human-readable **custom share code** assigned by an
+allme operator, beside the generated code the person's app displays. Both resolve
+to the same person.
+
+- **Both places this SDK takes a share code as input accept either**:
+  `client.SendConnectRequestAsync(shareCode)` (`POST /api/company-data/connect-requests`)
+  and `client.TwoFactor.ChallengeAsync(shareCode, idempotencyKey, context)`
+  (`POST /api/service-2fa/challenges`). Same parameter, same type, same shape —
+  nothing in the SDK changes, and a customer who gives you `ACME` instead of
+  `2I6UF3` simply works.
+- **Every `share_code` the API emits is the GENERATED code** — `Connection.ShareCode`,
+  `Change.ShareCode` and every webhook body. So a code handed to you by a customer
+  may differ from the one you read back for that same person, and anything you key
+  on the emitted value (a public-key cache, your own customer record) stays
+  internally consistent.
