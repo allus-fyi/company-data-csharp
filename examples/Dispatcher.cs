@@ -79,6 +79,10 @@ public sealed class Dispatcher
     public Task Enroll(HttpContext ctx, string id) =>
         FamilyOf(id) == Family.Identity ? _identity.Enroll(ctx, int.Parse(id)) : Web.NotFound(ctx);
 
+    /// <summary>POST /api/scenarios/{id}/cleanup — company-data-only (companydata:documents).</summary>
+    public Task Cleanup(HttpContext ctx, string id) =>
+        FamilyOf(id) == Family.CompanyData ? _companyData.Cleanup(ctx, id) : Web.NotFound(ctx);
+
     /// <summary>POST /api/scenarios/{id}/clear — family-agnostic (the store clears by scenario id).</summary>
     public async Task ClearScenario(HttpContext ctx, string id)
     {

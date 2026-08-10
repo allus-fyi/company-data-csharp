@@ -73,6 +73,8 @@ public sealed class CompanyDataHandlers
     private const string CallRequestFields = "Client.RequestFieldsAsync — GET /api/company-data/request-fields: your own request-field catalog, fetched once and cached for the life of the client";
     private const string CallProcessChanges = "Client.ProcessChangesAsync — drains the change feed through the crash-safe pump: handler before ack, at-least-once (dedup on Change.id), failures to the local dead-letter store";
     private const string CallCreateDocument = "Client.CreateDocumentAsync — {0}";
+    private const string CallListDocuments = "Client.ListDocumentsAsync — GET /api/company-data/documents: pages the service's documents so cleanup finds everything it created";
+    private const string CallDeleteDocument = "Client.DeleteDocumentAsync — DELETE /api/company-data/documents/{0}";
     private const string CallWebhookStarted = "(webhook run started) — POST /webhook receives each delivery; every poll also drains the change feed as a fallback";
     private const string CallVerifyWebhook = "Client.VerifyWebhook — checks the delivery's X-Allus-Signature HMAC against the secret configured for its X-Allus-Webhook-Id; a failure answers 401";
     private const string CallParseWebhook = "Client.ParseWebhook — turns the verified body into a typed Change, decrypting its value with the service key";
@@ -330,6 +332,39 @@ public sealed class CompanyDataHandlers
             docs.Add(new { index = docs.Count + 1, label = spec.Label, document_id = doc.Id, status = doc.Status });
         }
         return new { docs };
+    }
+
+    // ── POST /api/scenarios/{id}/cleanup (companydata:documents only) ──────────────
+
+    /// <summary>
+    /// Delete every document the documents scenario has created on this service, so a reused account
+    /// can reset between runs — companydata:documents is additive (CreateDocumentAsync mints a new
+    /// document each run; nothing deletes a prior run's). Not part of the generic dispatch: called
+    /// directly by the server, the same way Enroll is identity-only.
+    /// </summary>
+    public async Task Cleanup(HttpContext ctx, string id)
+    {
+        if (id != Documents) { await Web.NotFound(ctx); return; }
+        if (!_rt.HasConfig(id)) { await Web.WriteJson(ctx, new { error = "not_configured" }, 409); return; }
+        await DataRun(ctx, id, DoCleanupDocuments);
+    }
+
+    private async Task<object> DoCleanupDocuments(Client client, List<string> calls)
+    {
+        var deleted = 0;
+        while (true)
+        {
+            calls.Add(CallListDocuments);
+            var page = await client.ListDocumentsAsync(limit: 100, offset: 0);
+            if (page.Count == 0) break;
+            foreach (var doc in page)
+            {
+                calls.Add(string.Format(CallDeleteDocument, doc.Id));
+                await client.DeleteDocumentAsync(doc.Id!);
+                deleted++;
+            }
+        }
+        return new { deleted };
     }
 
     // ── companydata:webhook — the accumulating run + public receiver ────────────

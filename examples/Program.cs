@@ -127,6 +127,7 @@ app.MapGet("/api/meta", (HttpContext ctx) => dispatcher.Meta(ctx));
 app.MapPost("/api/scenarios/{id}/config", (HttpContext ctx, string id) => dispatcher.SaveConfig(ctx, id));
 app.MapPost("/api/scenarios/{id}/start", (HttpContext ctx, string id) => dispatcher.Start(ctx, id));
 app.MapPost("/api/scenarios/{id}/enroll", (HttpContext ctx, string id) => dispatcher.Enroll(ctx, id));
+app.MapPost("/api/scenarios/{id}/cleanup", (HttpContext ctx, string id) => dispatcher.Cleanup(ctx, id));
 app.MapPost("/api/scenarios/{id}/clear", (HttpContext ctx, string id) => dispatcher.ClearScenario(ctx, id));
 app.MapGet("/api/runs/{runId}", (HttpContext ctx, string runId) => dispatcher.RunStatus(ctx, runId));
 app.MapPost("/api/clear", (HttpContext ctx) => dispatcher.ClearAll(ctx));
