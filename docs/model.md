@@ -129,7 +129,13 @@ public sealed record Change(
     object? ValueObj = null,     // field_updated only; typed exactly like Value.ValueObj
     bool? Live = null,           // field_updated only
     DateTimeOffset? At = null)   // the change time (no separate UpdatedAt on a change)
-{ public object? Raw { get; init; } }
+{
+    public object? Raw { get; init; }
+    public string? ConnectionId { get; init; }    // message_received only — the connection to reply/ack on
+    public string? MessageId { get; init; }       // message_received only — the ack boundary
+    public string? PersonPublicKey { get; init; } // message_received only — base64 SPKI for the reply
+    public string? MessageBody { get; init; }     // message_received only — the DECRYPTED text
+}
 ```
 
 ### Events
@@ -141,6 +147,14 @@ public sealed record Change(
 | `field_updated` | `Slug` + decrypted `ValueObj` (+ `Live`); binary → a lazy `BinaryHandle` |
 | `field_deleted` | `Slug`, no value |
 | `consent_accepted` / `consent_declined` | `Slug` |
+| `message_received` | `ConnectionId`, `MessageId`, `PersonPublicKey` + `MessageBody` (the DECRYPTED message text); no slot. Person→company only — a broadcast raises no event |
+
+The event's ciphertext is carried under `body`. It is never `value`: on every other
+event `value` means field ciphertext, and a message body is not one.
+
+**Answering one.** `SendMessageAsync` answers **201** with the created message carrying
+`message_id`, which is what it returns — hand that id, or the inbound event's `MessageId`,
+to `MarkMessagesReadAsync` as the acknowledgement boundary.
 
 `Change.Id` is captured before the server's drain-delete, so it survives a
 crash + replay unchanged — dedup on it.

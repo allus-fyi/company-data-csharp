@@ -300,6 +300,18 @@ public sealed record Change(
     /// <summary>Set on <c>key_rotated</c> — SHA-256 fingerprint of the person's NEW public key.</summary>
     public string? PublicKeySha256 { get; init; }
 
+    /// <summary>Set on <c>message_received</c> — the connection to reply / acknowledge on.</summary>
+    public string? ConnectionId { get; init; }
+
+    /// <summary>Set on <c>message_received</c> — the ack boundary (<c>upToMessageId</c>).</summary>
+    public string? MessageId { get; init; }
+
+    /// <summary>Set on <c>message_received</c> — base64 SPKI to encrypt the reply to.</summary>
+    public string? PersonPublicKey { get; init; }
+
+    /// <summary>Set on <c>message_received</c> — the DECRYPTED message text.</summary>
+    public string? MessageBody { get; init; }
+
     public static Change FromApi(
         Node obj,
         TypeForSlug typeForSlug,
@@ -316,6 +328,18 @@ public sealed record Change(
             // Reuse the Value typing path so feed + connection produce identical typed values
             // (incl. the same lazy BinaryHandle for binaries).
             value = Value.TypedValue(obj, typeForSlug(slug), decryptValue, binaryFetch);
+        }
+
+        // message_received carries the connection to answer on, the ack boundary, the person's
+        // public key for the reply, and the message ciphertext itself; its created_at stays in Raw.
+        var isMessage = ev == "message_received";
+        string? messageBody = null;
+        if (isMessage && obj.Has("body"))
+        {
+            // The message ciphertext is carried under `body`, never `value`: on every other
+            // event `value` means field ciphertext, which a message body is not. It is
+            // encrypted for the SERVICE key, so the ordinary decrypt opens it.
+            messageBody = decryptValue(obj.Get("body"));
         }
 
         return new Change(
@@ -344,6 +368,10 @@ public sealed record Change(
             CustomerType = obj.Get("customer_type").AsString(),
             Verified = Value.VerifiedFrom(obj, value),
             PublicKeySha256 = ev == "key_rotated" ? obj.Get("public_key_sha256").AsString() : null,
+            ConnectionId = isMessage ? obj.Get("connection_id").AsString() : null,
+            MessageId = isMessage ? obj.Get("message_id").AsString() : null,
+            PersonPublicKey = isMessage ? obj.Get("person_public_key").AsString() : null,
+            MessageBody = messageBody,
         };
     }
 

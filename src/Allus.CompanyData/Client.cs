@@ -43,6 +43,7 @@ public sealed class Client : IDisposable
     private const string LogsPath = Base + "/logs";
     private const string DocumentsPath = Base + "/documents";
     private const string ConnectRequestsPath = Base + "/connect-requests";
+    private const string BroadcastPath = Base + "/broadcast"; // POST — one plaintext message to every connection
     private const string FlowsPath = Base + "/flows";        // POST /api/company-data/flows/{flowId}/runs
     private const string FlowRunsPath = Base + "/flow-runs"; // list / get / answers / generate
     private const string KeysPath = "/api/keys";
@@ -790,6 +791,114 @@ public sealed class Client : IDisposable
         if (string.IsNullOrEmpty(rid))
             throw new ApiException(0, "company_connections.request_failed", "no request_id in response");
         return rid!;
+    }
+
+    // ── messaging (company ↔ person) ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Send a 1-on-1 message to the connected person → the new message_id.
+    /// <c>POST /api/company-data/connections/{connectionId}/messages</c>. The message is end-to-end
+    /// encrypted before it leaves the process: one copy for the PERSON (<c>body</c>) and one for the
+    /// SERVICE (<c>sender_body</c>), so the person reads it in their app and this service can re-read
+    /// its own outbound text. The platform stores ciphertext only. The route answers 201 with the
+    /// created message carrying <c>message_id</c> — the boundary <see cref="MarkMessagesReadAsync"/> takes.
+    /// <para><paramref name="personPublicKey"/> is the base64 SPKI carried on the
+    /// <c>message_received</c> event — pass it to answer without a second key lookup. Without it the
+    /// key is resolved from the connection's <c>share_code</c> (or an explicit
+    /// <paramref name="shareCode"/>). Config-only key handling is unchanged: a recipient PUBLIC key
+    /// is neither a secret nor a configured key.</para>
+    /// <para>Refusals arrive as <see cref="ApiException"/> with the platform error_key:
+    /// <c>messages.messaging_not_entitled</c> / <c>messages.messaging_suspended</c> /
+    /// <c>messages.not_connected</c> (403), <c>messages.encryption_required</c> (400),
+    /// <c>messages.rate_limited</c> (429).</para>
+    /// </summary>
+    public async Task<string> SendMessageAsync(
+        string connectionId,
+        string text,
+        string? personPublicKey = null,
+        string? shareCode = null,
+        CancellationToken ct = default)
+    {
+        var cid = (connectionId ?? "").Trim();
+        if (cid.Length == 0) throw new ConfigException("connectionId is required");
+        if (string.IsNullOrWhiteSpace(text)) throw new ConfigException("text is required");
+
+        RSA personKey;
+        if (!string.IsNullOrEmpty(personPublicKey))
+        {
+            personKey = Crypto.LoadPublicKey(personPublicKey!);
+        }
+        else
+        {
+            var sc = shareCode ?? await ResolveShareCodeAsync(cid, null, ct).ConfigureAwait(false);
+            personKey = await RecipientPublicKeyAsync(sc, ct).ConfigureAwait(false);
+        }
+
+        // Both copies travel as JSON STRINGS — the message columns are text and the API tells
+        // ciphertext from plaintext by looking for the wrapper marker.
+        var body = new Dictionary<string, object?>
+        {
+            ["body"] = Crypto.EncryptForPublicKey(text, personKey).ToJsonString(),
+            ["sender_body"] = Crypto.EncryptForPublicKey(text, ServicePublicKey()).ToJsonString(),
+        };
+        var res = await _http.PostAsync($"{ConnectionsPath}/{cid}/messages", jsonBody: body, ct: ct)
+            .ConfigureAwait(false);
+        var mid = MessageIdOf(res);
+        if (string.IsNullOrEmpty(mid))
+            throw new ApiException(0, "messages.send_failed", "no message_id in response");
+        return mid!;
+    }
+
+    /// <summary>
+    /// Send one PLAINTEXT message to every person connected to this service.
+    /// <c>POST /api/company-data/broadcast</c>. A broadcast is deliberately not encrypted — one body
+    /// cannot be single-key-encrypted to every connection — so it is the one message the platform can
+    /// read, exactly as a broadcast document is. It seeds each recipient's ordinary 1-on-1 thread, and
+    /// a reply comes back end-to-end encrypted as a <c>message_received</c> event.
+    /// <para>Returns the API response. Refusals arrive as <see cref="ApiException"/>:
+    /// <c>messages.broadcast_audience_too_large</c> (422, over the connection cap),
+    /// <c>messages.broadcast_suspended</c> / <c>messages.messaging_suspended</c> /
+    /// <c>messages.messaging_not_entitled</c> (403).</para>
+    /// </summary>
+    public async Task<Node> BroadcastMessageAsync(string text, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(text)) throw new ConfigException("text is required");
+        return await _http.PostAsync(BroadcastPath,
+            jsonBody: new Dictionary<string, object?> { ["body"] = text }, ct: ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Acknowledge the inbound messages this service has handled, up to a boundary.
+    /// <c>POST /api/company-data/connections/{connectionId}/messages/read</c> with
+    /// <c>{up_to_message_id}</c>. Only the person's messages on THIS connection at or before that
+    /// message are marked read; one that arrived while the service was working stays unread, so
+    /// nothing is swept unhandled. Idempotent — a repeat is a no-op.
+    /// <para>Sending a reply does NOT acknowledge anything; a service that never acks lets its unread
+    /// grow. The boundary must be a message the PERSON sent on this connection: anything else is
+    /// refused with <see cref="ApiException"/> <c>company_data.ack_boundary_invalid</c> (400).</para>
+    /// </summary>
+    public async Task MarkMessagesReadAsync(
+        string connectionId, string upToMessageId, CancellationToken ct = default)
+    {
+        var cid = (connectionId ?? "").Trim();
+        if (cid.Length == 0) throw new ConfigException("connectionId is required");
+        var boundary = (upToMessageId ?? "").Trim();
+        if (boundary.Length == 0) throw new ConfigException("upToMessageId is required");
+        await _http.PostAsync($"{ConnectionsPath}/{cid}/messages/read",
+            jsonBody: new Dictionary<string, object?> { ["up_to_message_id"] = boundary },
+            ct: ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Pull the new message's id out of a send response — at the top level or nested under
+    /// <c>message</c>, and under either <c>message_id</c> or <c>id</c>.
+    /// </summary>
+    private static string? MessageIdOf(Node body)
+    {
+        var obj = body;
+        if (obj.Kind == NodeKind.Object && obj.Has("message")) obj = obj.Get("message");
+        var mid = obj.Get("message_id").AsString() ?? obj.Get("id").AsString();
+        return string.IsNullOrEmpty(mid) ? null : mid;
     }
 
     // ── contract-flow runs (company side — the company is a bound party) ─────────────────────────
