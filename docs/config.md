@@ -13,7 +13,7 @@ here.
 
 | Field | Type | Required | Default | Meaning |
 |-------|------|----------|---------|---------|
-| `api_url` | string | yes | — | API base, e.g. `https://api.allme.fyi`. |
+| `api_url` | string | yes | — | API base, e.g. `https://api.allme.fyi` — the platform's global front door. The token response names your home region and the SDK sends its data calls there from then on (README, **How it's wired** → Regions). |
 | `client_id` | string | yes | — | The `client_credentials` client id (scoped to one service). |
 | `client_secret` | string | yes | — | The client secret. |
 | `service_private_key` | string | yes | — | Path to the OpenSSL-encrypted PKCS#8 PEM (downloaded from the portal). |

@@ -6,6 +6,9 @@
 //    it POSTs client_id/client_secret to {api_url}/oauth2/token and caches the bearer token +
 //    expiry. Refresh is automatic + transparent; a 401 mid-flight triggers exactly one
 //    refresh-and-retry, then surfaces as AuthException.
+//  * Region — the configured api_url is the starting point AND the fallback: every response that
+//    can name a home base (the token response, a 421 refusal) rebases it, and the token request
+//    itself follows the rebase like every other call. See RebaseTo.
 //  * Format — sets Accept per Config.Format (application/json | application/xml) and parses the
 //    body into a Node accordingly (the XML path is XXE-safe — see Xml.cs).
 //  * Errors — maps non-2xx to the error taxonomy: 401 → refresh+retry then AuthException; 429 → read
@@ -28,13 +31,23 @@ public sealed class ApiHttp
     private const double DefaultBackoffSeconds = 1.0;
     private const double MaxBackoffSeconds = 60.0;
 
+    // The response member (token success body and 421 refusal body alike) naming the home-region base.
+    private const string RegionBaseMember = "api_url";
+    // The front door's refusal of a data route: rebase to the named base and replay.
+    private const string RebaseErrorKey = "region.rebase_required";
+
     private readonly Config _config;
     private readonly IHttpTransport _transport;
     private readonly Func<double, CancellationToken, Task> _sleep;
     private readonly Func<double> _clock;
     private readonly int _maxRetries429;
 
-    private readonly string _apiUrl;
+    /// <summary>
+    /// The base every request goes to, including the token request. Starts at the configured
+    /// value; every rebase moves it. Clients do not validate a server-returned base against
+    /// anything — they store it and use it.
+    /// </summary>
+    private string _apiUrl;
     private string? _token;
     private double _tokenExpiry; // monotonic deadline
 
@@ -57,6 +70,13 @@ public sealed class ApiHttp
 
     private bool TokenValid() => _token is not null && _clock() < _tokenExpiry;
 
+    /// <summary>
+    /// POST the client credentials to <c>/oauth2/token</c> and cache the result.
+    /// <para>Goes to the CURRENT base, exactly like every other call — once a token response has
+    /// named a home base, subsequent token requests go there too, the same as the data calls they
+    /// sit beside. The configured value is only the starting point, for the first call of a
+    /// process and the fallback when nothing has been stored yet.</para>
+    /// </summary>
     private async Task<string> FetchTokenAsync(CancellationToken ct)
     {
         var url = $"{_apiUrl}/oauth2/token";
@@ -115,7 +135,33 @@ public sealed class ApiHttp
 
         _token = accessToken;
         _tokenExpiry = _clock() + Math.Max(0.0, expiresIn - TokenExpirySkewSeconds);
+
+        // The token is minted at the client's home region and only validates there, so the base
+        // the response names is where every company-data call must go from here on.
+        string? homeBase = null;
+        if (body.ValueKind == JsonValueKind.Object && body.TryGetProperty(RegionBaseMember, out var au)
+            && au.ValueKind == JsonValueKind.String)
+            homeBase = au.GetString();
+        RebaseTo(homeBase);
         return _token!;
+    }
+
+    // ── region ─────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Point subsequent requests — including the next token request — at <paramref name="candidate"/>.
+    /// <para>Returns <c>true</c> only when the base actually MOVED. A candidate that is absent, empty,
+    /// or equal to the current base is not stored and yields <c>false</c>. Nothing here validates the
+    /// candidate against a fetched region list: the SDK stores the base the server names and uses it,
+    /// exactly as every first-party client does.</para>
+    /// </summary>
+    private bool RebaseTo(string? candidate)
+    {
+        if (candidate is null) return false;
+        var b = candidate.Trim().TrimEnd('/');
+        if (b.Length == 0 || b == _apiUrl) return false;
+        _apiUrl = b;
+        return true;
     }
 
     private async Task<string> BearerAsync(bool forceRefresh, CancellationToken ct)
@@ -236,7 +282,6 @@ public sealed class ApiHttp
         string? contentType = null,
         CancellationToken ct = default)
     {
-        var url = BuildUrl(path);
         var wantsXml = _config.Format == "xml";
         var accept = wantsXml ? "application/xml" : "application/json";
 
@@ -258,8 +303,11 @@ public sealed class ApiHttp
 
         var retries429 = 0;
         var refreshed401 = false;
+        var rebased421 = false;
         while (true)
         {
+            // Resolved per attempt: a 421 rebase moves the base under the next one.
+            var url = BuildUrl(path);
             var token = await BearerAsync(forceRefresh: false, ct).ConfigureAwait(false);
             var headers = new Dictionary<string, string>
             {
@@ -296,6 +344,23 @@ public sealed class ApiHttp
                     "unauthorized after token refresh"
                     + (errorKey is not null ? $" [{errorKey}]" : "")
                     + (message is not null ? $": {message}" : ""));
+            }
+
+            if (status == 421)
+            {
+                // The front door serves no data route: it names the caller's home base and expects
+                // the call there. Rebase once and replay; a second 421 surfaces.
+                var (errorKey, message, rebaseDetails) = ExtractError(resp);
+                if (!rebased421 && errorKey == RebaseErrorKey)
+                {
+                    rebaseDetails.TryGetValue(RegionBaseMember, out var candidate);
+                    if (RebaseTo(candidate as string))
+                    {
+                        rebased421 = true;
+                        continue;
+                    }
+                }
+                throw new ApiException(status, errorKey, message, rebaseDetails);
             }
 
             if (status == 429)
