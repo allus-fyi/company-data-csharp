@@ -4,9 +4,9 @@
 // hardened API payload Node (slug-keyed `values`; NO person source field) into typed objects,
 // decrypting ciphertext via the injected crypto closure.
 //
-//   RequestField { Slug, Label, Type, OneTime, Mandatory }   // YOUR request config
+//   RequestField { Slug, Label, Type, OneTime, Mandatory, Verified, VerifiedMaxAgeDays }
 //   Connection   { Id, PersonId, DisplayName, ConnectedAt, Values: {<slug>: Value} }
-//   Value        { ValueObj, Live, UpdatedAt }
+//   Value        { ValueObj, Live, UpdatedAt, Verified, VerifiedAt, VerifiedExpiresAt }
 //   Change       { Id, Event, PersonId, ShareCode?, Slug?, Value?, Live?, At }   // Id = stable dedup key
 //   LogEntry     { Type, Message, Metadata, At }
 //
@@ -14,7 +14,8 @@
 //   * email/phone/url/text                 → string
 //   * address/bank/creditcard              → IReadOnlyDictionary<string,object?> (parsed JSON object)
 //   * date/date_of_birth                   → DateOnly
-//   * photo/document/legal_document        → a lazy BinaryHandle
+//   * photo/document/legal_document and the ID-document subtypes
+//     passport/photo_id/drivers_license    → a lazy BinaryHandle
 //
 // Every model carries Raw — the underlying (hardened) API object graph — for debugging or an edge
 // case the SDK didn't model. It still never contains the person's source field. Decryption is
@@ -41,7 +42,9 @@ public delegate Task<BinaryFetchResult> BinaryFetch(string valueUrl, Cancellatio
 internal static class ModelCoerce
 {
     public static readonly string[] StructuredTypes = { "address", "bank", "creditcard" };
-    public static readonly string[] BinaryTypes = { "photo", "document", "legal_document" };
+    // The ID-document subtypes are children of legal_document and share its envelope.
+    public static readonly string[] BinaryTypes =
+        { "photo", "document", "legal_document", "passport", "photo_id", "drivers_license" };
     public static readonly string[] DateTypes = { "date", "date_of_birth" };
 
     public static DateTimeOffset? ParseIsoDt(string? value)
@@ -49,6 +52,32 @@ internal static class ModelCoerce
         if (string.IsNullOrEmpty(value)) return null;
         return DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture,
             DateTimeStyles.RoundtripKind, out var dt) ? dt : null;
+    }
+
+    /// <summary>
+    /// Whether a verification expiry stamp has already passed. Absent → false: a verification with
+    /// no expiry never lapses. Present but unparseable → true: an expiry that cannot be evaluated
+    /// cannot be used to claim the value is still verified today.
+    /// </summary>
+    public static bool ExpiryPassed(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var when = ParseIsoDt(value);
+        return when is null || when.Value <= DateTimeOffset.UtcNow;
+    }
+
+    /// <summary>Coerce a JSON number or an XML numeric string into an int, or null when absent.</summary>
+    public static int? CoerceInt(Node node)
+    {
+        if (node.IsNull) return null;
+        return node.RawScalar switch
+        {
+            long l => (int)l,
+            double d => (int)d,
+            string s => int.TryParse(s.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture,
+                out var parsed) ? parsed : null,
+            _ => null,
+        };
     }
 
     public static bool? CoerceBool(Node node)
@@ -96,6 +125,19 @@ public sealed record RequestField(
     /// <summary>Which customer TYPE this row applies to: "person"|"company"|"both" (B2B); null on older API.</summary>
     public string? Audience { get; init; }
 
+    /// <summary>
+    /// This row DEMANDS a verified answer: only a value the person verified satisfies it, and an
+    /// unverified candidate is refused at the accepting act rather than downgraded.
+    /// </summary>
+    public bool Verified { get; init; }
+
+    /// <summary>
+    /// The oldest verification the demand accepts, in days; null = no age limit. Enforced at the
+    /// accepting act only — a standing live link is not re-enforced afterwards, so apply your own
+    /// policy from each <see cref="Value.VerifiedAt"/>.
+    /// </summary>
+    public int? VerifiedMaxAgeDays { get; init; }
+
     public static RequestField FromApi(Node obj) => new(
         Slug: obj.Get("slug").AsString(),
         Label: obj.Get("label").AsString(),
@@ -106,6 +148,8 @@ public sealed record RequestField(
     {
         Raw = obj.ToObjectGraph(),
         Audience = obj.Get("audience").AsString(),
+        Verified = ModelCoerce.CoerceBool(obj.Get("verified")) ?? false,
+        VerifiedMaxAgeDays = ModelCoerce.CoerceInt(obj.Get("verified_max_age_days")),
     };
 
     public static List<RequestField> ListFromApi(Node body)
@@ -128,8 +172,20 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
     /// <summary>The underlying hardened API value object (escape hatch).</summary>
     public object? Raw { get; init; }
 
-    /// <summary>True iff the value carries verified metadata AND the hash matches.</summary>
+    /// <summary>True iff the hash recomputes over the plaintext AND the verification has not lapsed.</summary>
     public bool Verified { get; init; }
+
+    /// <summary>
+    /// When the person's answering field was verified; null when the value carries no verification.
+    /// A stamp, not a promise about today — read it with <see cref="Verified"/>.
+    /// </summary>
+    public DateTimeOffset? VerifiedAt { get; init; }
+
+    /// <summary>
+    /// When that verification lapses (a document-backed verification dies with the document);
+    /// null = it does not lapse. Past → <see cref="Verified"/> reads false.
+    /// </summary>
+    public DateTimeOffset? VerifiedExpiresAt { get; init; }
 
     public static Value FromApi(
         Node obj,
@@ -141,16 +197,30 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
         var updatedAt = ModelCoerce.ParseIsoDt(
             obj.Has("updatedAt") ? obj.Get("updatedAt").AsString() : obj.Get("updated_at").AsString());
         var typed = TypedValue(obj, fieldType, decryptValue, binaryFetch);
-        return new Value(typed, live, updatedAt) { Raw = obj.ToObjectGraph(), Verified = VerifiedFrom(obj, typed) };
+        return new Value(typed, live, updatedAt)
+        {
+            Raw = obj.ToObjectGraph(),
+            Verified = VerifiedFrom(obj, typed),
+            VerifiedAt = ModelCoerce.ParseIsoDt(obj.Get("verified_at").AsString()),
+            VerifiedExpiresAt = ModelCoerce.ParseIsoDt(obj.Get("verified_expires_at").AsString()),
+        };
     }
 
-    /// <summary>Recompute the verified flag from the just-decrypted plaintext (email string only).</summary>
+    /// <summary>
+    /// Recompute the verified flag from the just-decrypted plaintext (text values only).
+    ///
+    /// <para>Two conditions, both required: the hash recomputes over the exact plaintext, AND the
+    /// verification has not lapsed (<c>verified_expires_at</c> absent or still in the future). A
+    /// document-backed verification lapses when the document itself expires, so a stale binding
+    /// reads false here without any lookup.</para>
+    /// </summary>
     internal static bool VerifiedFrom(Node obj, object? plaintext)
     {
         if (plaintext is not string pt) return false;
         var vhash = obj.Get("verified_hash").AsString();
         var vsalt = obj.Get("verified_salt").AsString();
         if (string.IsNullOrEmpty(vhash) || string.IsNullOrEmpty(vsalt)) return false;
+        if (ModelCoerce.ExpiryPassed(obj.Get("verified_expires_at").AsString())) return false;
         return Crypto.HashMatches(vsalt, vhash, pt);
     }
 
@@ -294,8 +364,14 @@ public sealed record Change(
     /// <summary>The customer's TYPE: "person"|"company" (B2B); null on older API.</summary>
     public string? CustomerType { get; init; }
 
-    /// <summary>True iff a field_updated value is verified (hash matches the decrypted plaintext).</summary>
+    /// <summary>True iff a field_updated value's hash matches AND the verification has not lapsed.</summary>
     public bool Verified { get; init; }
+
+    /// <summary>When the answering field was verified; null when the value carries no verification.</summary>
+    public DateTimeOffset? VerifiedAt { get; init; }
+
+    /// <summary>When that verification lapses; null = it does not. Past → <see cref="Verified"/> reads false.</summary>
+    public DateTimeOffset? VerifiedExpiresAt { get; init; }
 
     /// <summary>Set on <c>key_rotated</c> — SHA-256 fingerprint of the person's NEW public key.</summary>
     public string? PublicKeySha256 { get; init; }
@@ -367,6 +443,8 @@ public sealed record Change(
             Raw = obj.ToObjectGraph(),
             CustomerType = obj.Get("customer_type").AsString(),
             Verified = Value.VerifiedFrom(obj, value),
+            VerifiedAt = ModelCoerce.ParseIsoDt(obj.Get("verified_at").AsString()),
+            VerifiedExpiresAt = ModelCoerce.ParseIsoDt(obj.Get("verified_expires_at").AsString()),
             PublicKeySha256 = ev == "key_rotated" ? obj.Get("public_key_sha256").AsString() : null,
             ConnectionId = isMessage ? obj.Get("connection_id").AsString() : null,
             MessageId = isMessage ? obj.Get("message_id").AsString() : null,

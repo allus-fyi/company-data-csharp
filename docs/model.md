@@ -13,10 +13,14 @@ Returned by `client.RequestFieldsAsync()`.
 public sealed record RequestField(
     string? Slug,      // the stable, company-set key — the contract for value access
     string? Label,     // the human label (rename freely; the slug stays)
-    string? Type,      // email|phone|url|text|address|bank|creditcard|date|date_of_birth|photo|document|legal_document
+    string? Type,      // email|phone|url|text|address|bank|creditcard|date|date_of_birth|photo|document|legal_document|passport|photo_id|drivers_license
     bool OneTime,      // a one-time snapshot vs a live (auto-updating) answer
     bool Mandatory)    // mandatory-to-provide OR mandatory-to-stay-connected (the API's two flags, folded)
-{ public object? Raw { get; init; } }
+{
+    public object? Raw { get; init; }
+    public bool Verified { get; init; }          // this row DEMANDS a verified answer (mutually exclusive with OneTime)
+    public int? VerifiedMaxAgeDays { get; init; } // oldest verification accepted; null = no age limit
+}
 ```
 
 ## `Connection`
@@ -48,7 +52,12 @@ public sealed record Value(
     object? ValueObj,                  // typed plaintext (see below)
     bool Live,                         // true = "keep connected" (auto-updates); false = one-time snapshot
     DateTimeOffset? UpdatedAt)         // when this answer last changed
-{ public object? Raw { get; init; } }
+{
+    public object? Raw { get; init; }
+    public bool Verified { get; init; }                  // the hash recomputes over the plaintext AND the verification has not lapsed
+    public DateTimeOffset? VerifiedAt { get; init; }        // when the answering field was verified
+    public DateTimeOffset? VerifiedExpiresAt { get; init; } // when that verification lapses; null = it does not
+}
 ```
 
 ### `ValueObj` types (resolved from the field's `type`)
@@ -58,7 +67,7 @@ public sealed record Value(
 | `email`, `phone`, `url`, `text` | `string` | The decrypted plaintext. |
 | `address`, `bank`, `creditcard` | `IDictionary<string, object?>` | The decrypted plaintext is a JSON object → parsed. A non-JSON structured value throws `DecryptException`. |
 | `date`, `date_of_birth` | `DateOnly` | Parsed from ISO `YYYY-MM-DD` (the leading 10 chars); falls back to the raw `string` if unparseable. |
-| `photo`, `document`, `legal_document` | `BinaryHandle` | Lazy — nothing fetched/decrypted until `.BytesAsync()`/`.SaveAsync()`. |
+| `photo`, `document`, `legal_document`, `passport`, `photo_id`, `drivers_license` | `BinaryHandle` | Lazy — nothing fetched/decrypted until `.BytesAsync()`/`.SaveAsync()`. The last three are ID-document subtypes of `legal_document` and share its envelope. |
 | unanswered / no value | `null` | The slot has no answer. |
 
 Cast `ValueObj` to the expected type per the slug's field type:
@@ -135,6 +144,9 @@ public sealed record Change(
     public string? MessageId { get; init; }       // message_received only — the ack boundary
     public string? PersonPublicKey { get; init; } // message_received only — base64 SPKI for the reply
     public string? MessageBody { get; init; }     // message_received only — the DECRYPTED text
+    public bool Verified { get; init; }                  // field_updated only; hash recomputes AND the verification has not lapsed
+    public DateTimeOffset? VerifiedAt { get; init; }        // when the answering field was verified
+    public DateTimeOffset? VerifiedExpiresAt { get; init; } // when that verification lapses; null = it does not
 }
 ```
 

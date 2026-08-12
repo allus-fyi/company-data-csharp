@@ -28,6 +28,11 @@ namespace Allus.CompanyData;
 /// and only for a type that can be attested (v1: <c>email</c>). Sending it on a <c>one_time</c> request is
 /// refused with <c>invalid_request</c> — that leg carries no source row id, so the server could
 /// neither enforce the requirement nor attest it.</para>
+///
+/// <para><c>VerifiedMaxAgeDays</c> narrows that demand to a RECENT verification. The app's
+/// registered configuration is a FLOOR and a request may only TIGHTEN it: the effective limit is
+/// the minimum of the two stated ages, and an omitted age tightens nothing — which is why null
+/// sends nothing at all rather than an explicit null. Below 1 is refused at the call.</para>
 /// </summary>
 public sealed record Claim(
     string Name,
@@ -35,7 +40,8 @@ public sealed record Claim(
     string? Suggest = null,
     bool Required = false,
     bool Verified = false,
-    string? Label = null);
+    string? Label = null,
+    int? VerifiedMaxAgeDays = null);
 
 /// <summary>
 /// Proof that a delivered value is the verified one.
@@ -50,13 +56,18 @@ public sealed record Claim(
 /// attested" — never "wrong" — and must be treated as unverified.</para>
 ///
 /// <para><c>VerifiedAt</c> carries the snapshot caveat: it attests the value as verified AT THAT
-/// MOMENT, not verified today. A field loses its verification whenever the person re-saves it.</para>
+/// MOMENT, not verified today. A field loses its verification whenever the person re-saves it.
+/// <c>VerifiedExpiresAt</c> is when that verification lapses on its own (a document-backed
+/// verification dies with the document); an EXPIRED attestation is unverified, so <c>Verified</c>
+/// already reads false once it has passed.</para>
 /// </summary>
-/// <param name="Verified">Recomputed here, constant-time; false = MISMATCH, reject the value.</param>
+/// <param name="Verified">Recomputed here, constant-time, AND not expired; false = MISMATCH or lapsed, reject the value.</param>
 /// <param name="Hash">Lowercase hex.</param>
 /// <param name="Salt">Lowercase hex.</param>
 /// <param name="VerifiedAt">When the field was verified — a snapshot, not verified-today.</param>
-public sealed record Attestation(bool Verified, string Hash, string Salt, string VerifiedAt);
+/// <param name="VerifiedExpiresAt">When the verification lapses; null when it does not.</param>
+public sealed record Attestation(bool Verified, string Hash, string Salt, string VerifiedAt,
+    string? VerifiedExpiresAt);
 
 /// <summary>
 /// The decrypted conclusion of <see cref="OAuthClient.CompleteSignInAsync"/>.
@@ -96,7 +107,10 @@ public sealed class OAuthClient
     /// <summary>The hosted consent surface. Native apps claim this https link; web is the fallback.</summary>
     public const string DefaultAuthorizeUrl = "https://web.allme.fyi/auth";
 
-    private static readonly HashSet<string> NonClaimable = new() { "photo", "document", "legal_document" };
+    // Binary field types can't be requested as claims — the ID-document subtypes are binary too,
+    // so no ID document ever reaches this surface.
+    private static readonly HashSet<string> NonClaimable = new()
+        { "photo", "document", "legal_document", "passport", "photo_id", "drivers_license" };
     private const int MaxClaims = 15;
     private static readonly HashSet<string> Modes = new() { "signin", "one_time", "connect", "2fa_enroll" };
     private static readonly HashSet<string> ResponseModes = new() { "redirect", "detached" };
@@ -182,6 +196,14 @@ public sealed class OAuthClient
             if (!string.IsNullOrEmpty(c.Suggest)) entry["suggest"] = c.Suggest;
             if (c.Required) entry["required"] = true;
             if (c.Verified) entry["verified"] = true;
+            if (c.VerifiedMaxAgeDays is not null)
+            {
+                // Refused HERE for the same reason a nameless claim is: the API rejects the whole
+                // request over it, and the integration error belongs at the call that made it.
+                if (c.VerifiedMaxAgeDays < 1)
+                    throw new ConfigException($"claim '{name}': VerifiedMaxAgeDays must be at least 1");
+                entry["verified_max_age_days"] = c.VerifiedMaxAgeDays.Value;
+            }
             if (!string.IsNullOrEmpty(c.Label)) entry["label"] = c.Label;
             outList.Add(entry);
             if (outList.Count >= MaxClaims) break;
@@ -295,13 +317,18 @@ public sealed class OAuthClient
             var hash = Str(parsed, "hash");
             var salt = Str(parsed, "salt");
             if (string.IsNullOrEmpty(hash) || string.IsNullOrEmpty(salt)) continue;
+            var expiresAt = Str(parsed, "verified_expires_at");
+            if (string.IsNullOrEmpty(expiresAt)) expiresAt = null;
             outMap[prop.Name] = new Attestation(
                 // Recomputed here, constant-time, over the plaintext just decrypted — never trusted
                 // from the server. false = the delivered value is NOT the verified one; reject it.
-                Crypto.HashMatches(salt!, hash!, plaintext),
+                // An attestation whose expiry has passed attests nothing today, so it reads false
+                // as well: an expired attestation is unverified, not "not attested".
+                Crypto.HashMatches(salt!, hash!, plaintext) && !ModelCoerce.ExpiryPassed(expiresAt),
                 hash!,
                 salt!,
-                Str(parsed, "verified_at") ?? string.Empty);
+                Str(parsed, "verified_at") ?? string.Empty,
+                expiresAt);
         }
         return outMap;
     }

@@ -383,9 +383,9 @@ See [Webhooks](#webhooks).
 You work with these objects and nothing else (all in `Allus.CompanyData`):
 
 ```text
-RequestField { Slug, Label, Type, OneTime, Mandatory }            // YOUR request config
+RequestField { Slug, Label, Type, OneTime, Mandatory, Verified, VerifiedMaxAgeDays }
 Connection   { Id, PersonId, DisplayName, ConnectedAt, Values: {<slug>: Value} }
-Value        { ValueObj, Live, UpdatedAt }
+Value        { ValueObj, Live, UpdatedAt, Verified, VerifiedAt, VerifiedExpiresAt }
 Change       { Id, Event, PersonId, Slug?, ValueObj?, Live?, At }
 LogEntry     { Type, Message, Metadata, At }
 ```
@@ -397,13 +397,16 @@ explicit slug you set per request field in the portal — rename the label freel
 the slug is the contract. **The person's source field is never exposed**: no
 source slug, no `field_id`, not even via `.Raw`.
 
-### `Value(ValueObj, Live, UpdatedAt)`
+### `Value(ValueObj, Live, UpdatedAt)` + `Verified`, `VerifiedAt`, `VerifiedExpiresAt`
 
 | Member | Meaning |
 |--------|---------|
 | `ValueObj` | The typed plaintext (see the table below) — `object?`, cast it per the field's type. |
 | `Live` | `true` if the person chose "keep connected" (auto-updates); `false` for a one-time snapshot. |
 | `UpdatedAt` | `DateTimeOffset?` of when this answer last changed (per-answer, rides on the `Value`). |
+| `Verified` | `true` only when the verification hash recomputes over the decrypted plaintext **and** the verification has not lapsed. Absent metadata reads `false`, which means "not attested", not "wrong". |
+| `VerifiedAt` | `DateTimeOffset?` the answering field was verified. A stamp, not a promise about today. |
+| `VerifiedExpiresAt` | `DateTimeOffset?` that verification lapses; `null` when it does not. A document-backed verification dies with the document; once this is past, `Verified` reads `false`. |
 
 ### Value types (from the field's `type`)
 
@@ -413,7 +416,7 @@ source slug, no `field_id`, not even via `.Raw`.
 | `country`, `nationality` | `string` — an ISO 3166-1 alpha-2 code (e.g. `"US"`, `"NL"`); not a display name |
 | `address`, `bank`, `creditcard` | `IDictionary<string, object?>` — the decrypted plaintext is a JSON object, parsed for you |
 | `date`, `date_of_birth` | `DateOnly` (falls back to the raw `string` if it can't be parsed) |
-| `photo`, `document`, `legal_document` | a lazy `BinaryHandle` — see below |
+| `photo`, `document`, `legal_document`, `passport`, `photo_id`, `drivers_license` | a lazy `BinaryHandle` — see below. The last three are ID-document subtypes of `legal_document`. |
 | unanswered / no value | `null` |
 
 `country`/`nationality` values are 2-letter ISO codes, and an `address`'s
@@ -1080,6 +1083,11 @@ will do"). A nameless or duplicate claim raises a config error at the call rathe
 `verified` is accepted only on the OIDC flow and only for a type allme can verify (today `email`); elsewhere
 it is refused with `invalid_request` rather than quietly dropped.
 
+`VerifiedMaxAgeDays` narrows a `verified` claim to a RECENT verification, and the merge is **tighten-only**: the app's
+registered configuration is a FLOOR, a request may only tighten it, and the effective limit is the minimum
+of the two stated ages. An omitted age tightens nothing — omitting it sends nothing at all, never an
+explicit null — and a value below 1 raises `ConfigException` at the call.
+
 The sign-in result carries `values`, `ValuesCipher` **and** `attestations`.
 * `sub` **is** the person's share code and equals `share_code` — byte-identical to the id_token's `sub`.
   `display_name` is gone: ask for a `name` claim and read the value under that key.
@@ -1089,10 +1097,12 @@ The sign-in result carries `values`, `ValuesCipher` **and** `attestations`.
   carries no ciphertext (`signin`, or `plaintext` delivery) — that emptiness is the honest answer.
 * `attestations` is an additive sibling map keyed by the same claim name, present only for a `verified`
   claim under encrypted delivery. Each entry carries a `verified` boolean **the SDK computes itself**, in
-  constant time, over the plaintext it just decrypted — plus the raw hash/salt/verifiedAt.
+  constant time, over the plaintext it just decrypted — plus the raw Hash/Salt/VerifiedAt/VerifiedExpiresAt.
   **A slug ABSENT from the map is "not attested", never "wrong"** (treat that value as unverified);
-  **an entry present with `verified` false is a MISMATCH and you must reject the value.** The timestamp
-  attests the value as verified *at that moment*, not verified today.
+  **an entry present with `verified` false is a MISMATCH and you must reject the value.** `VerifiedAt`
+  attests the value as verified *at that moment*, not verified today; `VerifiedExpiresAt` is when that
+  verification lapses on its own (`null` = it does not), and an **expired attestation is unverified** —
+  the computed `Verified` already reads false once it has passed.
 
 **`ResolveUserinfoAsync(accessToken, fallbackMode = null)`** is the second half of `CompleteSignInAsync` —
 the `UserinfoAsync` read + decrypt + attest, without the token exchange — for a caller whose exchange
