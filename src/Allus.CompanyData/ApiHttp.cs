@@ -11,9 +11,10 @@
 //    itself follows the rebase like every other call. See RebaseTo.
 //  * Format — sets Accept per Config.Format (application/json | application/xml) and parses the
 //    body into a Node accordingly (the XML path is XXE-safe — see Xml.cs).
-//  * Errors — maps non-2xx to the error taxonomy: 401 → refresh+retry then AuthException; 429 → read
-//    Retry-After + bounded backoff then RateLimitException; any other non-2xx → ApiException
-//    carrying the body's error_key when present.
+//  * Errors — maps non-2xx to the error taxonomy: 401 → refresh+retry then AuthException; 421 →
+//    rebase+retry once then ApiException; 429 → read Retry-After + bounded backoff then
+//    RateLimitException; any other non-2xx → ApiException carrying the body's error_key when
+//    present.
 //
 // Config-only key handling: the client id/secret come from Config — never a method argument.
 
@@ -135,7 +136,6 @@ public sealed class ApiHttp
 
         _token = accessToken;
         _tokenExpiry = _clock() + Math.Max(0.0, expiresIn - TokenExpirySkewSeconds);
-
         // The token is minted at the client's home region and only validates there, so the base
         // the response names is where every company-data call must go from here on.
         string? homeBase = null;
@@ -152,8 +152,7 @@ public sealed class ApiHttp
     /// Point subsequent requests — including the next token request — at <paramref name="candidate"/>.
     /// <para>Returns <c>true</c> only when the base actually MOVED. A candidate that is absent, empty,
     /// or equal to the current base is not stored and yields <c>false</c>. Nothing here validates the
-    /// candidate against a fetched region list: the SDK stores the base the server names and uses it,
-    /// exactly as every first-party client does.</para>
+    /// candidate against a fetched region list: the SDK stores the base the server names and uses it.</para>
     /// </summary>
     private bool RebaseTo(string? candidate)
     {
@@ -268,10 +267,10 @@ public sealed class ApiHttp
     /// The shared request loop for every verb (GET/raw included). Adds the bearer token + an Accept
     /// header matching <c>Config.Format</c>, carries an optional JSON or raw-bytes body, and maps
     /// non-2xx responses to the SDK errors: 401 → one refresh-and-retry then <see cref="AuthException"/>;
-    /// 429 → bounded Retry-After backoff then <see cref="RateLimitException"/>; other non-2xx →
-    /// <see cref="ApiException"/> (carrying the body's <c>error_key</c> when present). Returns the raw
-    /// successful <see cref="HttpResult"/> — <see cref="RequestAsync"/> parses it, <see cref="GetRawAsync"/>
-    /// returns its bytes untouched.
+    /// 421 → one rebase-and-retry then <see cref="ApiException"/>; 429 → bounded Retry-After backoff
+    /// then <see cref="RateLimitException"/>; other non-2xx → <see cref="ApiException"/> (carrying the
+    /// body's <c>error_key</c> when present). Returns the raw successful <see cref="HttpResult"/> —
+    /// <see cref="RequestAsync"/> parses it, <see cref="GetRawAsync"/> returns its bytes untouched.
     /// </summary>
     private async Task<HttpResult> RequestCoreAsync(
         string method,
@@ -306,9 +305,11 @@ public sealed class ApiHttp
         var rebased421 = false;
         while (true)
         {
-            // Resolved per attempt: a 421 rebase moves the base under the next one.
-            var url = BuildUrl(path);
+            // Resolved per attempt, AFTER the bearer call: the first BearerAsync of a process
+            // mints the token and rebases from its response, so the base a fresh token was
+            // just fetched under is the base this request must go to as well.
             var token = await BearerAsync(forceRefresh: false, ct).ConfigureAwait(false);
+            var url = BuildUrl(path);
             var headers = new Dictionary<string, string>
             {
                 ["Authorization"] = $"Bearer {token}",
@@ -386,11 +387,28 @@ public sealed class ApiHttp
         }
     }
 
+    /// <summary>
+    /// Resolve <paramref name="path"/> against the CURRENT base. An already-absolute
+    /// <paramref name="path"/> (the lazy binary handle's server-supplied <c>value_url</c>) is
+    /// reduced to its path+query and rebuilt against the current base too — so a value_url
+    /// minted before a rebase, or replayed on a 421 retry after one, still lands at the base
+    /// every other request now uses.
+    /// </summary>
     private string BuildUrl(string path)
     {
         if (path.StartsWith("http://", StringComparison.Ordinal) || path.StartsWith("https://", StringComparison.Ordinal))
-            return path;
+            path = PathAndQuery(path);
         return _apiUrl + (path.StartsWith('/') ? "" : "/") + path;
+    }
+
+    /// <summary>
+    /// The path + query + fragment portion of an absolute URL, dropping its scheme and host.
+    /// </summary>
+    private static string PathAndQuery(string absoluteUrl)
+    {
+        if (!Uri.TryCreate(absoluteUrl, UriKind.Absolute, out var uri))
+            return absoluteUrl;
+        return uri.PathAndQuery + uri.Fragment;
     }
 
     private static Node ParseBody(HttpResult resp, bool wantsXml)
