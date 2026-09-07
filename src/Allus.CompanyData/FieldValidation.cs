@@ -24,6 +24,13 @@ public static class FieldValidation
     private static readonly Regex PhoneRe = new(@"^\+?\d{4,15}$");
     private static readonly Regex CardRe = new(@"^\d{12,19}$");
     private static readonly Regex DateRe = new(@"^\d{4}-\d{2}-\d{2}$");
+    // Numeric grammars accept ASCII digits only.
+    private static readonly Regex IntegerRe = new(@"^-?[0-9]+$");
+    // decimal(10,2) is a FIXED shape: up to 8 integer digits + up to 2 decimal digits (10
+    // significant digits total), never a per-field configurable precision.
+    private static readonly Regex DecimalRe = new(@"^-?[0-9]{1,8}(\.[0-9]{1,2})?$");
+    // Float accepts decimal or scientific notation.
+    private static readonly Regex FloatRe = new(@"^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$");
 
     private static readonly Regex PostalRe = new(@"^[A-Za-z0-9][A-Za-z0-9 -]{1,9}$");
     private static readonly Regex ExpiryRe = new(@"^(0[1-9]|1[0-2])/\d{2}(\d{2})?$");
@@ -96,6 +103,9 @@ public static class FieldValidation
         ["legal_document"] = new("object"),
         ["number"] = new("number"),
         ["boolean"] = new("boolean"),
+        ["integer"] = new("integer"),
+        ["decimal"] = new("decimal"),
+        ["float"] = new("float"),
         ["country"] = new("countryCode"),
         ["nationality"] = new("countryCode"),
         // text + unknown => no rule => accept anything
@@ -154,6 +164,12 @@ public static class FieldValidation
                 if (t.Length == 0) return false;
                 return double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out var f)
                     && !double.IsInfinity(f) && !double.IsNaN(f);
+            case "integer":
+                return IntegerRe.IsMatch(value.Trim());
+            case "decimal":
+                return DecimalRe.IsMatch(value.Trim());
+            case "float":
+                return FloatRe.IsMatch(value.Trim());
             case "boolean":
                 return value == "true" || value == "false";
             case "countryCode":
