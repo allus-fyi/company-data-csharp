@@ -530,7 +530,11 @@ public sealed record Document(
     DateTimeOffset? UpdatedAt,
     bool RequiresSignature = false,
     bool RequiresAcceptance = false,
-    IReadOnlyList<object?>? Signatures = null)  // contract sign/accept audit trail (company-side reads only)
+    IReadOnlyList<object?>? Signatures = null,  // contract sign/accept audit trail (company-side reads only)
+    // Present only on a contract-flow run-participant document: the run's ordered signature
+    // summary, one entry per participant owing an act — each
+    // {party_key, document_id, position, status, action, acted_at}. Null on any other document.
+    IReadOnlyList<object?>? RunSignatures = null)
 {
     // The raw value Node (used by Json() to detect an {"_enc":1,…} per-person wrapper) + the
     // decrypt closure (over the loaded service private key). Neither is part of the public record.
@@ -590,7 +594,10 @@ public sealed record Document(
             RequiresAcceptance: ModelCoerce.CoerceBool(obj.Get("requires_acceptance")) ?? false,
             Signatures: obj.Has("signatures") && obj.Get("signatures").Kind == NodeKind.List
                 ? obj.Get("signatures").AsList().Select(n => n.ToObjectGraph()).ToList()
-                : new List<object?>())
+                : new List<object?>(),
+            RunSignatures: obj.Has("run_signatures") && obj.Get("run_signatures").Kind == NodeKind.List
+                ? obj.Get("run_signatures").AsList().Select(n => n.ToObjectGraph()).ToList()
+                : null)
         {
             _valueNode = obj.Has("value") ? valueNode : Node.Null,
             _decryptValue = decryptValue,
@@ -643,6 +650,13 @@ public sealed record FlowRun(
 
     /// <summary>Optional YYYY-MM-DD pinned "today" for flow constants; null when absent.</summary>
     public string? ReferenceDate { get; init; }
+
+    /// <summary>
+    /// Every party the run binds, the owning company included (flows.html §5a/§9 item 12).
+    /// <see cref="ConnectionId"/> above names only the PRIMARY counterparty, so a multi-actor
+    /// run's other counterparties are reachable only here.
+    /// </summary>
+    public IReadOnlyList<FlowRunParticipant> Participants { get; init; } = Array.Empty<FlowRunParticipant>();
 
     /// <summary>The party key the company is bound to (Bindings[key] == CompanyUserId).</summary>
     public string? CompanyPartyKey
@@ -705,8 +719,42 @@ public sealed record FlowRun(
         {
             Raw = obj.ToObjectGraph(),
             ReferenceDate = obj.Get("reference_date").AsString(),
+            Participants = obj.Get("participants").Kind == NodeKind.List
+                ? obj.Get("participants").AsList().Where(p => p.Kind == NodeKind.Object).Select(FlowRunParticipant.FromApi).ToList()
+                : Array.Empty<FlowRunParticipant>(),
         };
     }
+}
+
+/// <summary>
+/// One participant's row on a run's <c>participants[]</c> (flows.html §5a/§9 item 12) — the
+/// durable participant set, additively carrying its place in the leaf PDF rule's ordered signing
+/// plan. One account may hold TWO of these (two owner parties, or one customer bound to two
+/// party keys) — never collapse this to a single row by user id.
+/// </summary>
+public sealed record FlowRunParticipant(
+    string? PartyKey,
+    string? PersonUserId,
+    string? ConnectionId,
+    string? DocumentId,
+    string? DocumentStatus,
+    bool RequiresSignature,
+    bool RequiresAcceptance,
+    int? Position,   // 1-based place in the signing plan; null for a party the plan does not name
+    string? Action,  // "signed" | "accepted" | null — null until this participant's document has acted
+    string? ActedAt)
+{
+    public static FlowRunParticipant FromApi(Node obj) => new(
+        PartyKey: obj.Get("party_key").AsString(),
+        PersonUserId: obj.Get("person_user_id").AsString(),
+        ConnectionId: obj.Get("connection_id").AsString(),
+        DocumentId: obj.Get("document_id").AsString(),
+        DocumentStatus: obj.Get("document_status").AsString(),
+        RequiresSignature: ModelCoerce.CoerceBool(obj.Get("requires_signature")) ?? false,
+        RequiresAcceptance: ModelCoerce.CoerceBool(obj.Get("requires_acceptance")) ?? false,
+        Position: obj.Get("position").Kind == NodeKind.Scalar && int.TryParse(obj.Get("position").AsString(), out var pos) ? pos : null,
+        Action: obj.Get("action").AsString(),
+        ActedAt: obj.Get("acted_at").AsString());
 }
 
 /// <summary>A service activity-log entry — ops events only, never person data.</summary>

@@ -740,7 +740,14 @@ public sealed class Client : IDisposable
         _ => false,
     };
 
-    /// <summary>Set a document's lifecycle status (offering|ready_to_sign|active|active_but_ending|ended).</summary>
+    /// <summary>
+    /// Set a document's lifecycle status (offering|ready_to_sign|active|active_but_ending|ended).
+    /// <c>waiting</c> is read-only — stamped by a contract-flow run on an unsigned run-participant
+    /// copy, never a value to write. Throws with <c>error_key: "documents.run_managed"</c> (409)
+    /// when the document is a contract-flow run-participant document and its current status is
+    /// <c>waiting</c>, <c>ready_to_sign</c> or <c>offering</c> — that status moves only through
+    /// flow generation, the run's own advance, sign/accept, or a run cancel/decline.
+    /// </summary>
     public async Task<Document> UpdateDocumentStatusAsync(string documentId, string status, CancellationToken ct = default)
     {
         var body = await _http.PutAsync($"{DocumentsPath}/{documentId}",

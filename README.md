@@ -691,6 +691,13 @@ var doc = await client.DocumentAsync(contract.Id!);
 byte[] pdf = await client.DocumentFileAsync(contract.Id!);
 
 // Advance its lifecycle status.
+// A contract-flow-generated document can also read "waiting" — a run-participant
+// copy whose signer has not been reached yet in the run's ordered signing plan. It
+// is read-only: UpdateDocumentStatusAsync throws ApiException("documents.run_managed")
+// (409) on a run-participant document while it is waiting/ready_to_sign/offering —
+// that status moves only through flow generation, the run's own advance,
+// sign/accept, or a run cancel/decline. Such a document's RunSignatures carries the
+// run's ordered signature summary.
 await client.UpdateDocumentStatusAsync(contract.Id!,
     "active");   // offering | ready_to_sign | active | active_but_ending | ended
 
