@@ -60,14 +60,23 @@ public sealed record Claim(
 /// <c>VerifiedExpiresAt</c> is when that verification lapses on its own (a document-backed
 /// verification dies with the document); an EXPIRED attestation is unverified, so <c>Verified</c>
 /// already reads false once it has passed.</para>
+///
+/// <para><c>VerifiedMethod</c> / <c>VerifiedProvider</c> / <c>VerificationId</c> are the PROOF
+/// metadata read from the OPENED seal — HOW the value was bound, by WHOM, and the id to quote back
+/// to allme in a dispute. All three arrive together or not at all; a seal built before the proof
+/// log existed carries none of them and every one reads null.</para>
 /// </summary>
 /// <param name="Verified">Recomputed here, constant-time, AND not expired; false = MISMATCH or lapsed, reject the value.</param>
 /// <param name="Hash">Lowercase hex.</param>
 /// <param name="Salt">Lowercase hex.</param>
 /// <param name="VerifiedAt">When the field was verified — a snapshot, not verified-today.</param>
 /// <param name="VerifiedExpiresAt">When the verification lapses; null when it does not.</param>
+/// <param name="VerifiedMethod">HOW allme bound the value: <c>email_code</c> | <c>sms_code</c> | <c>sumsub_id</c> | <c>sumsub_address</c>. Read from the OPENED seal; null when not carried.</param>
+/// <param name="VerifiedProvider">WHO established the proof: <c>allme</c> | <c>sumsub</c>; null when not carried.</param>
+/// <param name="VerificationId">The id to quote back to allme in a dispute; null when not carried.</param>
 public sealed record Attestation(bool Verified, string Hash, string Salt, string VerifiedAt,
-    string? VerifiedExpiresAt);
+    string? VerifiedExpiresAt, string? VerifiedMethod = null, string? VerifiedProvider = null,
+    string? VerificationId = null);
 
 /// <summary>
 /// The decrypted conclusion of <see cref="OAuthClient.CompleteSignInAsync"/>.
@@ -328,7 +337,13 @@ public sealed class OAuthClient
                 hash!,
                 salt!,
                 Str(parsed, "verified_at") ?? string.Empty,
-                expiresAt);
+                expiresAt,
+                // Additive INSIDE the seal, and parse-permissive: a seal built before the proof
+                // log existed carries none of the three and every one reads null. An empty string
+                // is not an answer either, so it reads null too.
+                EmptyToNull(Str(parsed, "verified_method")),
+                EmptyToNull(Str(parsed, "verified_provider")),
+                EmptyToNull(Str(parsed, "verification_id")));
         }
         return outMap;
     }
@@ -415,6 +430,12 @@ public sealed class OAuthClient
         el.ValueKind == JsonValueKind.Object && el.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String
             ? p.GetString()
             : null;
+
+    /// <summary>
+    /// An empty string is not an answer — an absent seal member and one carrying <c>""</c> say the
+    /// same thing, and both read null so a caller's null check is the whole test.
+    /// </summary>
+    private static string? EmptyToNull(string? v) => string.IsNullOrEmpty(v) ? null : v;
 
     private static (string? Key, string? Msg) Err(string body)
     {

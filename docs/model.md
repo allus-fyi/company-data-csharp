@@ -57,6 +57,9 @@ public sealed record Value(
     public bool Verified { get; init; }                  // the hash recomputes over the plaintext AND the verification has not lapsed
     public DateTimeOffset? VerifiedAt { get; init; }        // when the answering field was verified
     public DateTimeOffset? VerifiedExpiresAt { get; init; } // when that verification lapses; null = it does not
+    public string? VerifiedMethod { get; init; }   // HOW allme bound it: email_code|sms_code|sumsub_id|sumsub_address
+    public string? VerifiedProvider { get; init; } // WHO established the proof: allme|sumsub
+    public string? VerificationId { get; init; }   // the proof id to quote back to allme in a dispute
 }
 ```
 
@@ -147,6 +150,9 @@ public sealed record Change(
     public bool Verified { get; init; }                  // field_updated only; hash recomputes AND the verification has not lapsed
     public DateTimeOffset? VerifiedAt { get; init; }        // when the answering field was verified
     public DateTimeOffset? VerifiedExpiresAt { get; init; } // when that verification lapses; null = it does not
+    public string? VerifiedMethod { get; init; }   // HOW allme bound it: email_code|sms_code|sumsub_id|sumsub_address
+    public string? VerifiedProvider { get; init; } // WHO established the proof: allme|sumsub
+    public string? VerificationId { get; init; }   // the proof id to quote back to allme in a dispute
 }
 ```
 

@@ -6,7 +6,8 @@
 //
 //   RequestField { Slug, Label, Type, OneTime, Mandatory, Verified, VerifiedMaxAgeDays }
 //   Connection   { Id, PersonId, DisplayName, ConnectedAt, Values: {<slug>: Value} }
-//   Value        { ValueObj, Live, UpdatedAt, Verified, VerifiedAt, VerifiedExpiresAt }
+//   Value        { ValueObj, Live, UpdatedAt, Verified, VerifiedAt, VerifiedExpiresAt,
+//                  VerifiedMethod, VerifiedProvider, VerificationId }
 //   Change       { Id, Event, PersonId, ShareCode?, Slug?, Value?, Live?, At }   // Id = stable dedup key
 //   LogEntry     { Type, Message, Metadata, At }
 //
@@ -187,6 +188,20 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
     /// </summary>
     public DateTimeOffset? VerifiedExpiresAt { get; init; }
 
+    /// <summary>
+    /// HOW allme bound this value: <c>email_code</c> | <c>sms_code</c> | <c>sumsub_id</c> |
+    /// <c>sumsub_address</c>. Null when the value was bound before the proof log existed — the
+    /// three proof members arrive together or not at all. Readable whatever
+    /// <see cref="Verified"/> says; that boolean stays the only trust decision.
+    /// </summary>
+    public string? VerifiedMethod { get; init; }
+
+    /// <summary>WHO established the proof: <c>allme</c> | <c>sumsub</c>. Same all-or-none set.</summary>
+    public string? VerifiedProvider { get; init; }
+
+    /// <summary>The id to quote back to allme in a dispute. Same all-or-none set.</summary>
+    public string? VerificationId { get; init; }
+
     public static Value FromApi(
         Node obj,
         string? fieldType,
@@ -203,6 +218,9 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
             Verified = VerifiedFrom(obj, typed),
             VerifiedAt = ModelCoerce.ParseIsoDt(obj.Get("verified_at").AsString()),
             VerifiedExpiresAt = ModelCoerce.ParseIsoDt(obj.Get("verified_expires_at").AsString()),
+            VerifiedMethod = obj.Get("verified_method").AsString(),
+            VerifiedProvider = obj.Get("verified_provider").AsString(),
+            VerificationId = obj.Get("verification_id").AsString(),
         };
     }
 
@@ -373,6 +391,20 @@ public sealed record Change(
     /// <summary>When that verification lapses; null = it does not. Past → <see cref="Verified"/> reads false.</summary>
     public DateTimeOffset? VerifiedExpiresAt { get; init; }
 
+    /// <summary>
+    /// HOW allme bound this value: <c>email_code</c> | <c>sms_code</c> | <c>sumsub_id</c> |
+    /// <c>sumsub_address</c>. Null when the value was bound before the proof log existed — the
+    /// three proof members arrive together or not at all. Readable whatever
+    /// <see cref="Verified"/> says; that boolean stays the only trust decision.
+    /// </summary>
+    public string? VerifiedMethod { get; init; }
+
+    /// <summary>WHO established the proof: <c>allme</c> | <c>sumsub</c>. Same all-or-none set.</summary>
+    public string? VerifiedProvider { get; init; }
+
+    /// <summary>The id to quote back to allme in a dispute. Same all-or-none set.</summary>
+    public string? VerificationId { get; init; }
+
     /// <summary>Set on <c>key_rotated</c> — SHA-256 fingerprint of the person's NEW public key.</summary>
     public string? PublicKeySha256 { get; init; }
 
@@ -445,6 +477,9 @@ public sealed record Change(
             Verified = Value.VerifiedFrom(obj, value),
             VerifiedAt = ModelCoerce.ParseIsoDt(obj.Get("verified_at").AsString()),
             VerifiedExpiresAt = ModelCoerce.ParseIsoDt(obj.Get("verified_expires_at").AsString()),
+            VerifiedMethod = obj.Get("verified_method").AsString(),
+            VerifiedProvider = obj.Get("verified_provider").AsString(),
+            VerificationId = obj.Get("verification_id").AsString(),
             PublicKeySha256 = ev == "key_rotated" ? obj.Get("public_key_sha256").AsString() : null,
             ConnectionId = isMessage ? obj.Get("connection_id").AsString() : null,
             MessageId = isMessage ? obj.Get("message_id").AsString() : null,

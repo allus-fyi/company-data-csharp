@@ -385,7 +385,8 @@ You work with these objects and nothing else (all in `Allus.CompanyData`):
 ```text
 RequestField { Slug, Label, Type, OneTime, Mandatory, Verified, VerifiedMaxAgeDays }
 Connection   { Id, PersonId, DisplayName, ConnectedAt, Values: {<slug>: Value} }
-Value        { ValueObj, Live, UpdatedAt, Verified, VerifiedAt, VerifiedExpiresAt }
+Value        { ValueObj, Live, UpdatedAt, Verified, VerifiedAt, VerifiedExpiresAt,
+               VerifiedMethod, VerifiedProvider, VerificationId }
 Change       { Id, Event, PersonId, Slug?, ValueObj?, Live?, At }
 LogEntry     { Type, Message, Metadata, At }
 ```
@@ -397,7 +398,7 @@ explicit slug you set per request field in the portal — rename the label freel
 the slug is the contract. **The person's source field is never exposed**: no
 source slug, no `field_id`, not even via `.Raw`.
 
-### `Value(ValueObj, Live, UpdatedAt)` + `Verified`, `VerifiedAt`, `VerifiedExpiresAt`
+### `Value(ValueObj, Live, UpdatedAt)` + `Verified`, `VerifiedAt`, `VerifiedExpiresAt`, `VerifiedMethod`, `VerifiedProvider`, `VerificationId`
 
 | Member | Meaning |
 |--------|---------|
@@ -407,6 +408,13 @@ source slug, no `field_id`, not even via `.Raw`.
 | `Verified` | `true` only when the verification hash recomputes over the decrypted plaintext **and** the verification has not lapsed. Absent metadata reads `false`, which means "not attested", not "wrong". |
 | `VerifiedAt` | `DateTimeOffset?` the answering field was verified. A stamp, not a promise about today. |
 | `VerifiedExpiresAt` | `DateTimeOffset?` that verification lapses; `null` when it does not. A document-backed verification dies with the document; once this is past, `Verified` reads `false`. |
+| `VerifiedMethod` | HOW allme bound the value: `email_code` \| `sms_code` \| `sumsub_id` \| `sumsub_address`. |
+| `VerifiedProvider` | WHO established the proof: `allme` \| `sumsub`. |
+| `VerificationId` | The proof id to quote back to allme in a dispute — it resolves the full record, including facts you never receive. |
+
+The last three are the **proof metadata** and arrive **together or not at all**: a value bound before
+the proof log existed carries the four verification keys and none of these, so all three read `null`.
+They are readable whatever the verified boolean says — that boolean stays the only trust decision.
 
 ### Value types (from the field's `type`)
 
@@ -485,6 +493,8 @@ A change-feed / webhook event.
 | `PersonId` | The person the change is about (may be `null`). |
 | `Slug`, `ValueObj`, `Live` | Present only on `field_updated`; `ValueObj` is typed exactly like `Value.ValueObj` (incl. a lazy `BinaryHandle` for binaries). Connection/consent events carry no slot/value. |
 | `ConnectionId`, `MessageId`, `PersonPublicKey`, `MessageBody` | Present only on `message_received` — a person messaged your service. `MessageBody` is the **decrypted** text. See [Messaging](#messaging). |
+| `Verified`, `VerifiedAt`, `VerifiedExpiresAt` | Present on `field_updated`, with the same meaning as on `Value`. |
+| `VerifiedMethod`, `VerifiedProvider`, `VerificationId` | The proof metadata, same meaning and same all-or-none rule as on `Value`. |
 | `At` | `DateTimeOffset?` of the change. (There is no separate `UpdatedAt` on a change.) |
 
 ### `.Raw`
@@ -1109,7 +1119,10 @@ The sign-in result carries `values`, `ValuesCipher` **and** `attestations`.
   carries no ciphertext (`signin`, or `plaintext` delivery) — that emptiness is the honest answer.
 * `attestations` is an additive sibling map keyed by the same claim name, present only for a `verified`
   claim under encrypted delivery. Each entry carries a `verified` boolean **the SDK computes itself**, in
-  constant time, over the plaintext it just decrypted — plus the raw Hash/Salt/VerifiedAt/VerifiedExpiresAt.
+  constant time, over the plaintext it just decrypted — plus the raw Hash/Salt/VerifiedAt/VerifiedExpiresAt,
+  and the proof metadata `VerifiedMethod`/`VerifiedProvider`/`VerificationId` read from the opened seal
+  (HOW the value was bound, by WHOM, and the id to quote back to allme in a dispute — all three together
+  or not at all; a seal built before the proof log existed carries none of them and every one reads `null`).
   **A slug ABSENT from the map is "not attested", never "wrong"** (treat that value as unverified);
   **an entry present with `verified` false is a MISMATCH and you must reject the value.** `VerifiedAt`
   attests the value as verified *at that moment*, not verified today; `VerifiedExpiresAt` is when that
