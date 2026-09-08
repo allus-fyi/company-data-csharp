@@ -617,16 +617,30 @@ public sealed class IdentityHandlers
     // ── input / config plumbing ────────────────────────────────────────────────────
 
     /// <summary>
-    /// The registered redirect URI: http://{host}/callback, host = the origin the browser actually used.
-    /// Never falls back to a hardcoded host — 127.0.0.1 and localhost are DIFFERENT origins for
-    /// redirect matching and for browser storage alike, so a substituted default drops the developer on an
-    /// origin whose localStorage never held the setup and whose URI the OAuth app never registered.
+    /// The scheme THIS request reached us on. There is no TLS termination in-process, so a TLS proxy in
+    /// front of the example is the only source: the first comma-separated value of
+    /// <c>X-Forwarded-Proto</c>, lowercased. Anything but <c>https</c> there — including an absent
+    /// header — means <c>http</c>.
+    /// </summary>
+    private static string RequestScheme(HttpContext ctx)
+    {
+        var raw = ctx.Request.Headers["X-Forwarded-Proto"].ToString();
+        var first = raw.Split(',')[0].Trim().ToLowerInvariant();
+        return first == "https" ? "https" : "http";
+    }
+
+    /// <summary>
+    /// The registered redirect URI: {scheme}://{host}/callback, host = the origin the browser actually
+    /// used and scheme = what it reached us on. Never falls back to a hardcoded host — 127.0.0.1 and
+    /// localhost are DIFFERENT origins for redirect matching and for browser storage alike, so a
+    /// substituted default drops the developer on an origin whose localStorage never held the setup and
+    /// whose URI the OAuth app never registered.
     /// </summary>
     private static string RedirectUri(HttpContext ctx)
     {
         var host = ctx.Request.Host.Value;
         if (string.IsNullOrWhiteSpace(host)) throw new InvalidOperationException(NoOrigin);
-        return $"http://{host.Trim()}/callback";
+        return $"{RequestScheme(ctx)}://{host.Trim()}/callback";
     }
 
     /// <summary>
