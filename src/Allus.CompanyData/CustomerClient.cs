@@ -97,6 +97,7 @@ public sealed class CustomerClient
     private const string Consents = "/api/company-connections/consents";
     private const string CustomerChanges = "/api/customer/changes";
     private const string Keys = "/api/keys";
+    private const string FieldTypesPath = "/api/contact-field-types";
 
     private readonly Config _config;
     private readonly ApiHttp _http;
@@ -131,6 +132,16 @@ public sealed class CustomerClient
     private readonly System.Collections.Generic.Dictionary<string, ulong> _serviceKeyGen = new();
     // "companyCode/serviceCode" → {request_field_id: field_type}, for typed-answer validation.
     private readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.Dictionary<string, string>> _requestTypeCache = new();
+
+    // The field-type registry, fetched beside the request-field lookup and held for the life of the
+    // client. A type it does not carry triggers ONE refetch; a type a refetch still does not resolve
+    // is remembered in _unresolvedTypes and never asked for again. Both live under _otherLock,
+    // beside the caches they are read with.
+    private FieldTypeRegistry? _fieldTypes;
+    // The last registry load's failure, held so a synchronous reader raises it instead of reading
+    // an empty registry. Cleared by the first load that succeeds.
+    private Exception? _fieldTypesFailure;
+    private readonly HashSet<string> _unresolvedTypes = new(StringComparer.Ordinal);
     private Pump? _pump;
 
     public CustomerClient(
@@ -345,7 +356,7 @@ public sealed class CustomerClient
                 InvalidateServiceKey(companyCode!, serviceCode!);
             }
         }
-        return Change.FromApi(ev, _ => null, DecryptAccount);
+        return Change.FromApi(ev, _ => null, LoadedFieldTypes, DecryptAccount);
     }
 
     public Task ProcessChangesAsync(Func<Change, Task> handler, ProcessOptions? options = null, System.Threading.CancellationToken ct = default)
@@ -365,10 +376,10 @@ public sealed class CustomerClient
         => Webhooks.VerifyWebhook(rawBody, headers, _config);
 
     public Change ParseWebhook(object rawBody, IReadOnlyDictionary<string, string>? headers)
-        => Webhooks.ParseWebhook(rawBody, headers, _config, _ => null, DecryptAccount, accountKey: _accountKey);
+        => Webhooks.ParseWebhook(rawBody, headers, _config, _ => null, LoadedFieldTypes, DecryptAccount, accountKey: _accountKey);
 
     public Change HandleWebhook(object rawBody, IReadOnlyDictionary<string, string>? headers)
-        => Webhooks.HandleWebhook(rawBody, headers, _config, _ => null, DecryptAccount, accountKey: _accountKey);
+        => Webhooks.HandleWebhook(rawBody, headers, _config, _ => null, LoadedFieldTypes, DecryptAccount, accountKey: _accountKey);
 
     // ── internals ──────────────────────────────────────────────────────────────────
 
@@ -383,6 +394,93 @@ public sealed class CustomerClient
     /// per company/service. Best-effort — a lookup failure yields an empty map so typed-answer
     /// validation is simply skipped.
     /// </summary>
+    /// <summary>
+    /// The field-type registry — what every TYPE in a request catalog means.
+    /// </summary>
+    /// <remarks>
+    /// Fetched from <c>GET /api/contact-field-types</c> beside the connect-screen lookup this client
+    /// resolves a request row's type from, and held in memory for the life of the client. It is what
+    /// validates a typed answer before it is encrypted.
+    /// </remarks>
+    public async Task<FieldTypeRegistry> FieldTypesAsync(System.Threading.CancellationToken ct = default)
+    {
+        lock (_otherLock)
+        {
+            if (_fieldTypes is not null) return _fieldTypes;
+        }
+        var registry = await LoadFieldTypesAsync(ct).ConfigureAwait(false);
+        lock (_otherLock) _fieldTypes = registry;
+        return registry;
+    }
+
+    /// <summary>One fetch of the registry rows, with no caching of its own.</summary>
+    /// <remarks>
+    /// A failure is remembered as a failure: re-thrown to the caller that asked, and recorded so a
+    /// synchronous reader raises it too rather than reading an empty registry, whose "accept
+    /// anything" answer for an unknown type would be indistinguishable from a real one.
+    /// </remarks>
+    private async Task<FieldTypeRegistry> LoadFieldTypesAsync(System.Threading.CancellationToken ct)
+    {
+        try
+        {
+            // The registry route answers JSON to every caller — it is not one of the customer
+            // routes that honour the configured Format — so its body is parsed as JSON whatever
+            // this client speaks elsewhere.
+            var resp = await _http.GetResponseAsync(FieldTypesPath, ct: ct).ConfigureAwait(false);
+            var registry = new FieldTypeRegistry(_http.ParseResponseAsJson(resp));
+            lock (_otherLock) _fieldTypesFailure = null;
+            return registry;
+        }
+        catch (Exception exc)
+        {
+            lock (_otherLock) _fieldTypesFailure = exc;
+            throw;
+        }
+    }
+
+    /// <summary>One bounded refetch when the held registry does not carry a type in use.</summary>
+    /// <remarks>
+    /// The refetch replaces the held registry only once it has ARRIVED, so a refetch that fails
+    /// leaves the rows already loaded standing rather than none at all.
+    /// </remarks>
+    private async Task EnsureTypesKnownAsync(IEnumerable<string> types, System.Threading.CancellationToken ct)
+    {
+        var registry = await FieldTypesAsync(ct).ConfigureAwait(false);
+        List<string> missing;
+        lock (_otherLock)
+        {
+            missing = types
+                .Where(t => !string.IsNullOrEmpty(t) && !registry.Knows(t) && !_unresolvedTypes.Contains(t))
+                .ToList();
+        }
+        if (missing.Count == 0) return;
+        registry = await LoadFieldTypesAsync(ct).ConfigureAwait(false);
+        lock (_otherLock)
+        {
+            _fieldTypes = registry;
+            foreach (var type in missing)
+            {
+                if (!registry.Knows(type)) _unresolvedTypes.Add(type);
+            }
+        }
+    }
+
+    /// <summary>The registry the synchronous webhook parsers read; the request-field lookup loads it.</summary>
+    /// <remarks>
+    /// A load that FAILED raises that failure rather than answering an empty registry — "unknown
+    /// accepts anything" is a verdict about the deployment, never a stand-in for a fetch that did
+    /// not happen. A client that never asked for the registry reads the empty one.
+    /// </remarks>
+    private FieldTypeRegistry LoadedFieldTypes()
+    {
+        lock (_otherLock)
+        {
+            if (_fieldTypes is not null) return _fieldTypes;
+            if (_fieldTypesFailure is not null) throw _fieldTypesFailure;
+            return new FieldTypeRegistry();
+        }
+    }
+
     private async Task<Dictionary<string, string>> RequestFieldTypesAsync(string companyCode, string serviceCode, System.Threading.CancellationToken ct)
     {
         var key = $"{companyCode}/{serviceCode}";
@@ -407,6 +505,10 @@ public sealed class CustomerClient
             }
         }
         catch (ApiException) { /* best-effort — skip validation when unavailable */ }
+        // Cached only once the registry carries the types the lookup named: a cache published ahead
+        // of a failed heal is never retried, and every answer it types is then validated against a
+        // registry that does not know the type.
+        await EnsureTypesKnownAsync(map.Values, ct).ConfigureAwait(false);
         lock (_otherLock) _requestTypeCache[key] = map;
         return map;
     }
@@ -420,7 +522,8 @@ public sealed class CustomerClient
         var types = await RequestFieldTypesAsync(companyCode, serviceCode, ct).ConfigureAwait(false);
         foreach (var a in answers)
         {
-            if (types.TryGetValue(a.RequestFieldId, out var ft) && !FieldValidation.IsValid(ft, a.Value))
+            var registry = await FieldTypesAsync(ct).ConfigureAwait(false);
+            if (types.TryGetValue(a.RequestFieldId, out var ft) && !registry.IsFieldValueValid(ft, a.Value))
                 throw new ValidationException(a.RequestFieldId, ft);
         }
         return answers.Select(a => (object)new Dictionary<string, object?>

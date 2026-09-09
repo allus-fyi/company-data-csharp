@@ -146,7 +146,7 @@ public sealed class WebhookTests : IDisposable
     public void ParsePlainJsonBody()
     {
         var body = ChangeBody();
-        var change = Webhooks.ParseWebhook(body, Headers(body), _config, TypeForSlug(), DecryptValue());
+        var change = Webhooks.ParseWebhook(body, Headers(body), _config, TypeForSlug(), FieldValidationTests.Registry, DecryptValue());
         Assert.Equal("chg-1", change.Id);
         Assert.Equal("field_updated", change.Event);
         Assert.Equal("person-1", change.PersonId);
@@ -174,7 +174,7 @@ public sealed class WebhookTests : IDisposable
         var bytes = Encoding.UTF8.GetBytes(xml);
         var headers = Headers(bytes);
 
-        var change = Webhooks.ParseWebhook(bytes, headers, _config, TypeForSlug(), DecryptValue());
+        var change = Webhooks.ParseWebhook(bytes, headers, _config, TypeForSlug(), FieldValidationTests.Registry, DecryptValue());
         Assert.Equal("chg-7", change.Id);
         Assert.Equal("field_updated", change.Event);
         Assert.Equal("work_email", change.Slug);
@@ -203,7 +203,7 @@ public sealed class WebhookTests : IDisposable
         var headers = Headers(body); // HMAC is over the envelope (the final body)
 
         Assert.True(Webhooks.VerifyWebhook(body, headers, config));
-        var change = Webhooks.ParseWebhook(body, headers, config, TypeForSlug(), DecryptValue());
+        var change = Webhooks.ParseWebhook(body, headers, config, TypeForSlug(), FieldValidationTests.Registry, DecryptValue());
         Assert.Equal("chg-1", change.Id);
         Assert.Equal("field_updated", change.Event);
         Assert.Equal("work_email", change.Slug);
@@ -219,7 +219,7 @@ public sealed class WebhookTests : IDisposable
         var body = Encryptor.WrapAccountSha1(accountPub, ChangeBody());
         // _config has no account_private_key.
         Assert.Throws<WebhookException>(() =>
-            Webhooks.ParseWebhook(body, Headers(body), _config, TypeForSlug(), DecryptValue()));
+            Webhooks.ParseWebhook(body, Headers(body), _config, TypeForSlug(), FieldValidationTests.Registry, DecryptValue()));
         accountPub.Dispose();
     }
 
@@ -229,7 +229,7 @@ public sealed class WebhookTests : IDisposable
     public void HandleVerifyThenParse()
     {
         var body = ChangeBody();
-        var change = Webhooks.HandleWebhook(body, Headers(body), _config, TypeForSlug(), DecryptValue());
+        var change = Webhooks.HandleWebhook(body, Headers(body), _config, TypeForSlug(), FieldValidationTests.Registry, DecryptValue());
         Assert.Equal("chg-1", change.Id);
     }
 
@@ -240,7 +240,7 @@ public sealed class WebhookTests : IDisposable
         var headers = Headers(body);
         headers["X-Allus-Signature"] = "deadbeef"; // wrong
         Assert.Throws<WebhookException>(() =>
-            Webhooks.HandleWebhook(body, headers, _config, TypeForSlug(), DecryptValue()));
+            Webhooks.HandleWebhook(body, headers, _config, TypeForSlug(), FieldValidationTests.Registry, DecryptValue()));
     }
 
     // ── Client method delegation ──────────────────────────────────────────────────────────────
@@ -341,7 +341,7 @@ public sealed class WebhookTests : IDisposable
         };
         var body = Encryptor.WrapAccountSha1(accountPub, ChangeBody());
         var change = Webhooks.ParseWebhook( // no accountKey arg → loaded from config on demand
-            body, Headers(body), cfg, TypeForSlug(), DecryptValue());
+            body, Headers(body), cfg, TypeForSlug(), FieldValidationTests.Registry, DecryptValue());
         Assert.Equal("chg-1", change.Id);
         Assert.Equal(Vector.TextPlaintext, change.ValueObj);
         accountPub.Dispose();

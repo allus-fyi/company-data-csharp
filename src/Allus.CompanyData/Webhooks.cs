@@ -136,6 +136,7 @@ public static class Webhooks
         IReadOnlyDictionary<string, string>? headers,
         Config config,
         TypeForSlug typeForSlug,
+        FieldTypesSource fieldTypes,
         DecryptValue decryptValue,
         BinaryFetch? binaryFetch = null,
         RSA? accountKey = null)
@@ -144,7 +145,7 @@ public static class Webhooks
         var payload = DecodePayload(body, config, accountKey);
         if (payload.Kind != NodeKind.Object)
             throw new WebhookException("webhook payload is not a JSON/XML object");
-        return Change.FromApi(payload, typeForSlug, decryptValue, binaryFetch);
+        return Change.FromApi(payload, typeForSlug, fieldTypes, decryptValue, binaryFetch);
     }
 
     /// <summary>
@@ -156,13 +157,14 @@ public static class Webhooks
         IReadOnlyDictionary<string, string>? headers,
         Config config,
         TypeForSlug typeForSlug,
+        FieldTypesSource fieldTypes,
         DecryptValue decryptValue,
         BinaryFetch? binaryFetch = null,
         RSA? accountKey = null)
     {
         if (!VerifyWebhook(rawBody, headers, config))
             throw new WebhookException("webhook signature verification failed");
-        return ParseWebhook(rawBody, headers, config, typeForSlug, decryptValue, binaryFetch, accountKey);
+        return ParseWebhook(rawBody, headers, config, typeForSlug, fieldTypes, decryptValue, binaryFetch, accountKey);
     }
 
     // ── payload decoding (JSON / XML / encrypt_payload envelope) ──────────────────────────────

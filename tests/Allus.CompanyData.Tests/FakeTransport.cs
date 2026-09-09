@@ -100,6 +100,11 @@ public sealed class RouterTransport : IHttpTransport
         IReadOnlyDictionary<string, string> headers, CancellationToken ct)
     {
         Gets.Add((url, query));
+        // The registry route is served the way a deployment serves it: the client fetches it beside
+        // the request-field catalog, and a fake that did not answer it would be testing an
+        // environment no deployment has.
+        if (url.EndsWith("/api/contact-field-types", StringComparison.Ordinal))
+            return Task.FromResult(Resp.Ok(FieldValidationTests.RegistryBody()));
         return Task.FromResult(_router(url, query));
     }
 

@@ -41,7 +41,7 @@ public sealed class PumpTests : IDisposable
 
     // The decrypt callable injected into the pump (mirrors the real Client closure).
     private Func<Node, Change> DecryptChange =>
-        ev => Change.FromApi(ev, _ => "text", w => Crypto.Decrypt(w, _key));
+        ev => Change.FromApi(ev, _ => "text", FieldValidationTests.Registry, w => Crypto.Decrypt(w, _key));
 
     private static List<Node> MakeEvents(int count, int start = 1)
     {
@@ -453,7 +453,7 @@ public sealed class PumpTests : IDisposable
         {
             var cid = ev.Get("id").AsString();
             if (cid == "chg-0002") { decryptCalls++; throw new DecryptException("corrupt ciphertext for chg-0002"); }
-            return Change.FromApi(ev, _ => "text", w => Crypto.Decrypt(w, _key));
+            return Change.FromApi(ev, _ => "text", FieldValidationTests.Registry, w => Crypto.Decrypt(w, _key));
         };
 
         var events = MakeEvents(1, start: 1);
@@ -494,7 +494,7 @@ public sealed class PumpTests : IDisposable
         Func<Node, Change> decryptChange = ev =>
             ev.Get("id").AsString() == "chg-0001"
                 ? throw new DecryptException("undecryptable")
-                : Change.FromApi(ev, _ => "text", w => Crypto.Decrypt(w, _key));
+                : Change.FromApi(ev, _ => "text", FieldValidationTests.Registry, w => Crypto.Decrypt(w, _key));
 
         var src = new FakeSource(new[] { MakePoisonEvent("chg-0001") });
         var pump = new Pump(_config, src.Fetch, decryptChange, sleep: (_, _) => Task.CompletedTask);

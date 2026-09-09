@@ -18,8 +18,13 @@
 //   * Decryption — the service private key is loaded ONCE at construction from the configured
 //     encrypted PEM + passphrase into an in-memory RSA; a DecryptValue closure over it is handed to
 //     every model factory + the pump (config-only key handling — never a method argument).
-//   * Slug catalog — RequestFieldsAsync() is fetched once + cached; its slug→type map types every
-//     value (address parses to a dictionary, photo becomes a lazy binary handle, etc.).
+//   * Slug catalog — RequestFieldsAsync() is fetched once + cached; its slug→type map names the
+//     TYPE of every value.
+//   * Field-type registry — FieldTypesAsync() is fetched beside the catalog and held for the life
+//     of the client; it is what a type MEANS, so a value's shape follows the type's resolved
+//     primitive and storage lane (a composite parses to a dictionary, a photo/document lane becomes
+//     a lazy binary handle) rather than a list of type names. A type the held registry does not
+//     carry triggers one bounded refetch.
 //   * Binary — a value's BinaryHandle.BytesAsync() GETs the slot file endpoint and returns the file
 //     bytes. That endpoint has two 200 shapes — an {"encrypted":true,"value":<wrapper>} JSON
 //     envelope the same service-key decrypt unwraps, or the raw file bytes under the file's own
@@ -40,6 +45,7 @@ public sealed class Client : IDisposable
     private const string ConnectionsPath = Base + "/connections";
     private const string ChangesPath = Base + "/changes";
     private const string RequestFieldsPath = Base + "/request-fields";
+    private const string FieldTypesPath = "/api/contact-field-types";
     private const string LogsPath = Base + "/logs";
     private const string DocumentsPath = Base + "/documents";
     private const string ConnectRequestsPath = Base + "/connect-requests";
@@ -64,8 +70,23 @@ public sealed class Client : IDisposable
     private readonly RSA _privateKey;
     private readonly RSA? _accountKey;
 
+    // The slug catalog, fetched once and held for the life of the client. A slug it does not
+    // carry — a request slot configured after this client started — triggers ONE refetch; a slug a
+    // refetch still does not carry is remembered in _unresolvedSlugs and never asked for again, so
+    // a slot this deployment does not have cannot turn every later value into a round trip.
     private IReadOnlyList<RequestField>? _requestFields;
     private Dictionary<string, string?> _typeBySlug = new();
+    private readonly HashSet<string> _unresolvedSlugs = new(StringComparer.Ordinal);
+
+    // The field-type registry, fetched beside the catalog and held for the life of the client. A
+    // type it does not carry triggers ONE refetch; a type a refetch still does not resolve is
+    // remembered in _unresolvedTypes and never asked for again, so a value of a type this
+    // deployment does not have cannot turn every later value into a round trip.
+    private FieldTypeRegistry? _fieldTypes;
+    private readonly HashSet<string> _unresolvedTypes = new(StringComparer.Ordinal);
+    // The last registry load's failure, held so a synchronous reader raises it instead of reading
+    // an empty registry. Cleared by the first load that succeeds.
+    private Exception? _fieldTypesFailure;
     private Pump? _pump;
     private bool _disposed;
 
@@ -177,11 +198,36 @@ public sealed class Client : IDisposable
             ContentSha256: digest);
     }
 
+    /// <summary>Resolve a request slug to its field type (loads the catalog once).</summary>
+    /// <remarks>
+    /// The payload is the trigger. The SLUG a value or a change names is what the held catalog may
+    /// not carry, and no walk of that catalog can discover it; the slug itself asks for one catalog
+    /// refetch, and the type that refetch names goes on to the registry heal. The model factory
+    /// that calls this is synchronous, so it blocks on the refetch exactly as it already blocks on
+    /// the first catalog load.
+    /// </remarks>
     private string? TypeForSlugImpl(string slug)
     {
         if (_requestFields is null)
             RequestFieldsAsync().GetAwaiter().GetResult();
+        if (!_typeBySlug.ContainsKey(slug))
+            EnsureSlugKnownAsync(slug, CancellationToken.None).GetAwaiter().GetResult();
         return _typeBySlug.GetValueOrDefault(slug);
+    }
+
+    /// <summary>One bounded refetch of the catalog when it does not carry a slug in use.</summary>
+    /// <remarks>
+    /// A request slot configured after this client started is what makes a slug unknown here, and
+    /// one refetch of the catalog is what resolves it — together with the type that slot
+    /// introduced, which the reload puts through the registry heal. A slug still absent afterwards
+    /// belongs to no slot this client can see, so it is remembered and never asked for again.
+    /// </remarks>
+    private async Task EnsureSlugKnownAsync(string slug, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(slug) || _typeBySlug.ContainsKey(slug) || _unresolvedSlugs.Contains(slug))
+            return;
+        await LoadRequestFieldsAsync(ct).ConfigureAwait(false);
+        if (!_typeBySlug.ContainsKey(slug)) _unresolvedSlugs.Add(slug);
     }
 
     // ── definitions ────────────────────────────────────────────────────────────────────────────
@@ -194,15 +240,122 @@ public sealed class Client : IDisposable
     public async Task<IReadOnlyList<RequestField>> RequestFieldsAsync(CancellationToken ct = default)
     {
         if (_requestFields is null)
+            await LoadRequestFieldsAsync(ct).ConfigureAwait(false);
+        return _requestFields!;
+    }
+
+    /// <summary>One fetch of the catalog, replacing the held one only once it has ARRIVED.</summary>
+    private async Task LoadRequestFieldsAsync(CancellationToken ct)
+    {
+        var body = await _http.GetAsync(RequestFieldsPath, ct: ct).ConfigureAwait(false);
+        var fields = RequestField.ListFromApi(body);
+        var bySlug = fields.Where(f => f.Slug is not null)
+            .GroupBy(f => f.Slug!)
+            .ToDictionary(g => g.Key, g => g.First().Type);
+        // The catalog is published only once the registry that types it has loaded. Publishing
+        // first would let a registry failure leave a cached catalog behind that no later call
+        // retries, and every value it types would then be read through a registry that knows
+        // nothing.
+        await EnsureTypesKnownAsync(bySlug.Values, ct).ConfigureAwait(false);
+        _typeBySlug = bySlug;
+        _requestFields = fields;
+    }
+
+    /// <summary>
+    /// The field-type registry — what every TYPE in the catalog means.
+    /// </summary>
+    /// <remarks>
+    /// Fetched from <c>GET /api/contact-field-types</c> beside the request-field catalog and held in
+    /// memory for the life of the client. It says which primitive draws a type, which named check
+    /// verifies it, which regexes it adds, which sub-fields it carries and on which storage lane its
+    /// value lives — so a value's shape and a value's validity both follow the served rows rather
+    /// than a list of type names.
+    /// </remarks>
+    public async Task<FieldTypeRegistry> FieldTypesAsync(CancellationToken ct = default)
+    {
+        _fieldTypes ??= await LoadFieldTypesAsync(ct).ConfigureAwait(false);
+        return _fieldTypes;
+    }
+
+    /// <summary>One fetch of the registry rows, with no caching of its own.</summary>
+    /// <remarks>
+    /// A failure is remembered as a failure: re-thrown to the caller that asked, and recorded so a
+    /// synchronous reader raises it too rather than reading an empty registry, whose "accept
+    /// anything" answer for an unknown type would be indistinguishable from a real one.
+    /// </remarks>
+    private async Task<FieldTypeRegistry> LoadFieldTypesAsync(CancellationToken ct)
+    {
+        try
         {
-            var body = await _http.GetAsync(RequestFieldsPath, ct: ct).ConfigureAwait(false);
-            var fields = RequestField.ListFromApi(body);
-            _requestFields = fields;
-            _typeBySlug = fields.Where(f => f.Slug is not null)
-                .GroupBy(f => f.Slug!)
-                .ToDictionary(g => g.Key, g => g.First().Type);
+            // The registry route answers JSON to every caller — it is not one of the company-data
+            // routes that honour the configured Format — so its body is parsed as JSON whatever this
+            // client speaks elsewhere.
+            var resp = await _http.GetResponseAsync(FieldTypesPath, ct: ct).ConfigureAwait(false);
+            var registry = new FieldTypeRegistry(_http.ParseResponseAsJson(resp));
+            _fieldTypesFailure = null;
+            return registry;
         }
-        return _requestFields;
+        catch (Exception exc)
+        {
+            _fieldTypesFailure = exc;
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// One bounded refetch when the held registry does not carry a type in use.
+    /// </summary>
+    /// <remarks>
+    /// A row added to the registry after this client started is what makes a type unknown here, and
+    /// one refetch is what resolves it. A type still absent afterwards is this deployment's answer,
+    /// not a stale cache, so it is remembered and never asked for again.
+    /// </remarks>
+    private async Task EnsureTypesKnownAsync(IEnumerable<string?> types, CancellationToken ct)
+    {
+        var registry = await FieldTypesAsync(ct).ConfigureAwait(false);
+        var missing = types
+            .Where(t => !string.IsNullOrEmpty(t) && !registry.Knows(t) && !_unresolvedTypes.Contains(t!))
+            .Select(t => t!)
+            .ToList();
+        if (missing.Count == 0) return;
+        // The refetch replaces the held registry only once it has ARRIVED. Clearing first would let
+        // a failed refetch leave no registry at all, and every type would then read as unknown — a
+        // verdict about the deployment standing in for a fetch that did not happen.
+        registry = await LoadFieldTypesAsync(ct).ConfigureAwait(false);
+        _fieldTypes = registry;
+        foreach (var type in missing)
+        {
+            if (!registry.Knows(type)) _unresolvedTypes.Add(type);
+        }
+    }
+
+    /// <summary>The registry the synchronous model factories read; the catalog loads it first.</summary>
+    /// <remarks>
+    /// A load that FAILED raises that failure here rather than answering an empty registry — an
+    /// unloaded registry says every type is unknown, and "unknown accepts anything" is a verdict
+    /// about the deployment, never a stand-in for a fetch that did not happen. A client that has
+    /// never asked for the registry — a receiver calling only the webhook parsers — reads the empty
+    /// one, which is the honest answer for a client that fetched nothing.
+    /// </remarks>
+    private FieldTypeRegistry LoadedFieldTypes()
+    {
+        if (_fieldTypes is not null) return _fieldTypes;
+        if (_fieldTypesFailure is not null) throw _fieldTypesFailure;
+        return new FieldTypeRegistry();
+    }
+
+    /// <summary>
+    /// What every path that TYPES a payload does first: hold the catalog, and hold a registry that
+    /// carries every type the catalog names.
+    /// </summary>
+    /// <remarks>
+    /// This is the catalog leg only. The payload leg — a slug or a type the held state does not
+    /// carry — runs from <see cref="TypeForSlugImpl"/>, on the value or change that named it.
+    /// </remarks>
+    private async Task PrepareTypingAsync(CancellationToken ct)
+    {
+        await RequestFieldsAsync(ct).ConfigureAwait(false);
+        await EnsureTypesKnownAsync(_typeBySlug.Values, ct).ConfigureAwait(false);
     }
 
     // ── connections (heavily rate-limited — initial sync / reconciliation) ─────────────────────
@@ -226,7 +379,7 @@ public sealed class Client : IDisposable
     {
         var page = Math.Max(1, limit);
         var cur = Math.Max(0, offset);
-        await RequestFieldsAsync(ct).ConfigureAwait(false); // ensure the catalog is loaded for typing
+        await PrepareTypingAsync(ct).ConfigureAwait(false); // the catalog and its registry, before typing
 
         var yielded = 0;
         long? total = null;
@@ -246,6 +399,7 @@ public sealed class Client : IDisposable
                 yield return Connection.FromApi(
                     obj,
                     TypeForSlugImpl,
+                    LoadedFieldTypes,
                     DecryptValueImpl,
                     (url, c) => BinaryFetchImpl(url, c),
                     identity: obj); // the list row carries identity AND the values map
@@ -289,14 +443,14 @@ public sealed class Client : IDisposable
     /// </summary>
     public async Task<Connection> ConnectionAsync(string id, CancellationToken ct = default)
     {
-        await RequestFieldsAsync(ct).ConfigureAwait(false);
+        await PrepareTypingAsync(ct).ConfigureAwait(false);
         var body = await _http.GetAsync($"{ConnectionsPath}/{id}", ct: ct).ConfigureAwait(false);
         if (body.Kind == NodeKind.Object && body.Has("items") && !body.Has("values"))
         {
             var items = ListItems(body);
             body = items.Count > 0 ? items[0] : Node.Object(new Dictionary<string, Node>());
         }
-        return Connection.FromApi(body, TypeForSlugImpl, DecryptValueImpl, (url, c) => BinaryFetchImpl(url, c));
+        return Connection.FromApi(body, TypeForSlugImpl, LoadedFieldTypes, DecryptValueImpl, (url, c) => BinaryFetchImpl(url, c));
     }
 
     // ── logs (moderate rate-limit) ──────────────────────────────────────────────────────────────
@@ -379,7 +533,7 @@ public sealed class Client : IDisposable
             var shareCode = ev.Get("share_code").AsString() ?? ev.Get("id").Get("share_code").AsString();
             if (!string.IsNullOrEmpty(shareCode)) InvalidatePublicKey(shareCode!);
         }
-        return Change.FromApi(ev, TypeForSlugImpl, DecryptValueImpl, (url, c) => BinaryFetchImpl(url, c));
+        return Change.FromApi(ev, TypeForSlugImpl, LoadedFieldTypes, DecryptValueImpl, (url, c) => BinaryFetchImpl(url, c));
     }
 
     /// <summary>
@@ -393,14 +547,14 @@ public sealed class Client : IDisposable
         ProcessOptions? options = null,
         CancellationToken ct = default)
     {
-        await RequestFieldsAsync(ct).ConfigureAwait(false); // ensure the catalog is loaded for typing
+        await PrepareTypingAsync(ct).ConfigureAwait(false); // the catalog and its registry, before typing
         await Pump.ProcessChangesAsync(handler, options, ct).ConfigureAwait(false);
     }
 
     /// <summary>Raw, UNBUFFERED drain → <c>List&lt;Change&gt;</c> (advanced — you own durability).</summary>
     public async Task<List<Change>> DrainBatchAsync(int max = DefaultConnPage, CancellationToken ct = default)
     {
-        await RequestFieldsAsync(ct).ConfigureAwait(false);
+        await PrepareTypingAsync(ct).ConfigureAwait(false);
         return await Pump.DrainBatchAsync(max, ct).ConfigureAwait(false);
     }
 
@@ -413,7 +567,7 @@ public sealed class Client : IDisposable
         ProcessOptions? options = null,
         CancellationToken ct = default)
     {
-        await RequestFieldsAsync(ct).ConfigureAwait(false);
+        await PrepareTypingAsync(ct).ConfigureAwait(false);
         return await Pump.RetryDeadLettersAsync(handler, options, ct).ConfigureAwait(false);
     }
 
@@ -428,7 +582,7 @@ public sealed class Client : IDisposable
     {
         EnsureCatalogForWebhook();
         return Webhooks.ParseWebhook(rawBody, headers, _config,
-            TypeForSlugImpl, DecryptValueImpl, (url, c) => BinaryFetchImpl(url, c), _accountKey);
+            TypeForSlugImpl, LoadedFieldTypes, DecryptValueImpl, (url, c) => BinaryFetchImpl(url, c), _accountKey);
     }
 
     /// <summary>Verify + parse a webhook in one call → <see cref="Change"/>.</summary>
@@ -436,7 +590,7 @@ public sealed class Client : IDisposable
     {
         EnsureCatalogForWebhook();
         return Webhooks.HandleWebhook(rawBody, headers, _config,
-            TypeForSlugImpl, DecryptValueImpl, (url, c) => BinaryFetchImpl(url, c), _accountKey);
+            TypeForSlugImpl, LoadedFieldTypes, DecryptValueImpl, (url, c) => BinaryFetchImpl(url, c), _accountKey);
     }
 
     // The webhook parse path types the value via the cached request-fields catalog (one lazy fetch,
@@ -1059,11 +1213,22 @@ public sealed class Client : IDisposable
         // definition, BEFORE encryption. Skip when the type can't be resolved.
         foreach (var (slug, val) in fill)
         {
-            var ft = FieldTypeForSlug(run.Definition, slug);
-            if (!string.IsNullOrEmpty(ft))
+            var element = FieldElementForSlug(run.Definition, slug);
+            var ft = element is null ? null : FieldTypeOfElement(element);
+            if (element is not null && !string.IsNullOrEmpty(ft))
             {
                 var plainForCheck = val is string vs ? vs : JsonSerializer.Serialize(val);
-                if (!FieldValidation.IsValid(ft!, plainForCheck)) throw new ValidationException(slug, ft!);
+                // The type is named by the pinned definition — a payload, not the request catalog —
+                // so it can be one the held registry has never seen. One bounded refetch resolves
+                // it; a type still absent afterwards validates as unknown, which accepts anything.
+                await EnsureTypesKnownAsync(new[] { ft }, ct).ConfigureAwait(false);
+                var registry = await FieldTypesAsync(ct).ConfigureAwait(false);
+                // A choice type whose ROW carries no options takes them from the ELEMENT, which is
+                // the only place they exist for select/multiselect. Passing them is what lets the
+                // answer be validated at all instead of being measured against an empty domain.
+                var options = FieldElementOptions(element);
+                if (!registry.IsFieldValueValid(ft!, plainForCheck, options))
+                    throw new ValidationException(slug, ft!);
             }
         }
 
@@ -1256,12 +1421,12 @@ public sealed class Client : IDisposable
     }
 
     /// <summary>
-    /// Resolve a field element's <c>field_type</c> from the pinned flow definition by scanning
-    /// every node's elements for a <c>kind:"field"</c> element with the given slug. Returns null
-    /// when the slug is not a field element (or elements are absent) — callers then SKIP
-    /// validation rather than invent a type.
+    /// Resolve a fill slug to its field ELEMENT in the pinned flow definition by scanning every
+    /// node's elements for a <c>kind:"field"</c> element with the given slug. Returns null when the
+    /// slug is not a field element (or elements are absent) — callers then SKIP validation rather
+    /// than invent a type.
     /// </summary>
-    private static string? FieldTypeForSlug(Node definition, string slug)
+    private static Node? FieldElementForSlug(Node definition, string slug)
     {
         if (definition.Get("nodes").Kind != NodeKind.List) return null;
         foreach (var n in definition.Get("nodes").AsList())
@@ -1270,14 +1435,36 @@ public sealed class Client : IDisposable
             foreach (var el in n.Get("elements").AsList())
             {
                 if (el.Kind != NodeKind.Object) continue;
-                if (el.Get("kind").AsString() == "field" && el.Get("slug").AsString() == slug)
-                {
-                    var ft = el.Get("field_type").AsString();
-                    return string.IsNullOrEmpty(ft) ? el.Get("type").AsString() : ft;
-                }
+                if (el.Get("kind").AsString() == "field" && el.Get("slug").AsString() == slug) return el;
             }
         }
         return null;
+    }
+
+    /// <summary>A field element's declared type, null when it names none.</summary>
+    private static string? FieldTypeOfElement(Node element)
+    {
+        var ft = element.Get("field_type").AsString();
+        return string.IsNullOrEmpty(ft) ? element.Get("type").AsString() : ft;
+    }
+
+    /// <summary>The option VALUES a flow field element supplies.</summary>
+    /// <remarks>
+    /// An element's options are <c>{value, label, available_if?}</c> objects; the value is the
+    /// domain member. null when the element carries none, which leaves the row's own options — if
+    /// it has any — to govern.
+    /// </remarks>
+    private static IReadOnlyList<string>? FieldElementOptions(Node element)
+    {
+        if (element.Get("options").Kind != NodeKind.List) return null;
+        var values = new List<string>();
+        foreach (var option in element.Get("options").AsList())
+        {
+            if (option.Kind != NodeKind.Object) continue;
+            var value = option.Get("value");
+            if (!value.IsNull) values.Add(value.AsString() ?? "");
+        }
+        return values.Count > 0 ? values : null;
     }
 
     /// <summary>Build a <c>data:&lt;mime&gt;;base64,&lt;…&gt;</c> URI for the per-person file envelope.</summary>

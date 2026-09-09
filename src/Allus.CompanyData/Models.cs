@@ -11,12 +11,14 @@
 //   Change       { Id, Event, PersonId, ShareCode?, Slug?, Value?, Live?, At }   // Id = stable dedup key
 //   LogEntry     { Type, Message, Metadata, At }
 //
-// Typed values:
-//   * email/phone/url/text                 → string
-//   * address/bank/creditcard              → IReadOnlyDictionary<string,object?> (parsed JSON object)
-//   * date/date_of_birth                   → DateOnly
-//   * photo/document/legal_document and the ID-document subtypes
-//     passport/photo_id/drivers_license    → a lazy BinaryHandle
+// A value's shape follows the RESOLVED DEFINITION of its field type (FieldTypeRegistry), never a
+// list of type names:
+//   * storage lane photo/document → a lazy BinaryHandle
+//   * primitive composite         → IReadOnlyDictionary<string,object?> (parsed JSON object)
+//   * primitive multilist         → a parsed JSON array
+//   * primitive date              → DateOnly
+//   * everything else             → the plaintext string, whose grammar the registry's
+//                                   Validate() states
 //
 // Every model carries Raw — the underlying (hardened) API object graph — for debugging or an edge
 // case the SDK didn't model. It still never contains the person's source field. Decryption is
@@ -35,6 +37,13 @@ public delegate string DecryptValue(object wrapper);
 public delegate string? TypeForSlug(string slug);
 
 /// <summary>
+/// The served registry, supplied as a callback rather than an instance: resolving a slug is what
+/// heals the registry, so a factory handed the registry itself would hold the one from BEFORE the
+/// heal and type the very value that triggered it against rows that do not carry its type.
+/// </summary>
+public delegate FieldTypeRegistry FieldTypesSource();
+
+/// <summary>
 /// A binary fetch closure: a slot value_url → the classified response (either the inner
 /// {"_enc":1,...} wrapper, or the file bytes themselves when the person's source field is not private).
 /// </summary>
@@ -42,12 +51,6 @@ public delegate Task<BinaryFetchResult> BinaryFetch(string valueUrl, Cancellatio
 
 internal static class ModelCoerce
 {
-    public static readonly string[] StructuredTypes = { "address", "bank", "creditcard" };
-    // The ID-document subtypes are children of legal_document and share its envelope.
-    public static readonly string[] BinaryTypes =
-        { "photo", "document", "legal_document", "passport", "photo_id", "drivers_license" };
-    public static readonly string[] DateTypes = { "date", "date_of_birth" };
-
     public static DateTimeOffset? ParseIsoDt(string? value)
     {
         if (string.IsNullOrEmpty(value)) return null;
@@ -205,13 +208,14 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
     public static Value FromApi(
         Node obj,
         string? fieldType,
+        FieldTypesSource fieldTypes,
         DecryptValue decryptValue,
         BinaryFetch? binaryFetch)
     {
         var live = ModelCoerce.CoerceBool(obj.Get("live")) ?? false;
         var updatedAt = ModelCoerce.ParseIsoDt(
             obj.Has("updatedAt") ? obj.Get("updatedAt").AsString() : obj.Get("updated_at").AsString());
-        var typed = TypedValue(obj, fieldType, decryptValue, binaryFetch);
+        var typed = TypedValue(obj, fieldType, fieldTypes, decryptValue, binaryFetch);
         return new Value(typed, live, updatedAt)
         {
             Raw = obj.ToObjectGraph(),
@@ -245,13 +249,19 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
     internal static object? TypedValue(
         Node obj,
         string? fieldType,
+        FieldTypesSource fieldTypes,
         DecryptValue decryptValue,
         BinaryFetch? binaryFetch)
     {
         var ftype = (fieldType ?? "").ToLowerInvariant();
+        // The registry is read HERE and not before: fieldType was resolved by a call that may have
+        // healed the registry, and this value — the one that triggered the heal — must be typed by
+        // the rows the heal brought in.
+        var registry = fieldTypes();
+        var definition = registry.Resolve(ftype);
 
         // Binary → a lazy handle over the slot value_url (no eager fetch/decrypt).
-        if (ModelCoerce.BinaryTypes.Contains(ftype) || obj.Has("value_url"))
+        if (registry.IsBinary(ftype) || obj.Has("value_url"))
         {
             var valueUrl = obj.Get("value_url").AsString();
             if (valueUrl is null)
@@ -268,7 +278,7 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
         var ciphertext = obj.Get("value");
         var plaintext = decryptValue(ciphertext);
 
-        if (ModelCoerce.StructuredTypes.Contains(ftype))
+        if (definition.Input is "composite" or "multilist")
         {
             try
             {
@@ -281,13 +291,13 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
             }
         }
 
-        if (ModelCoerce.DateTypes.Contains(ftype))
+        if (definition.Input == "date")
         {
             var parsed = ModelCoerce.ParseDate(plaintext);
             return parsed.HasValue ? parsed.Value : plaintext;
         }
 
-        // text/email/phone/url and anything unknown → the plaintext string.
+        // Every other primitive, and a type the registry does not carry, is the plaintext string.
         return plaintext;
     }
 }
@@ -315,6 +325,7 @@ public sealed record Connection(
     public static Connection FromApi(
         Node obj,
         TypeForSlug typeForSlug,
+        FieldTypesSource fieldTypes,
         DecryptValue decryptValue,
         BinaryFetch? binaryFetch = null,
         Node? identity = null)
@@ -338,7 +349,7 @@ public sealed record Connection(
             foreach (var (slug, entry) in valuesNode.AsObject())
             {
                 if (entry.Kind != NodeKind.Object) continue;
-                values[slug] = Value.FromApi(entry, typeForSlug(slug), decryptValue, binaryFetch);
+                values[slug] = Value.FromApi(entry, typeForSlug(slug), fieldTypes, decryptValue, binaryFetch);
             }
         }
 
@@ -423,6 +434,7 @@ public sealed record Change(
     public static Change FromApi(
         Node obj,
         TypeForSlug typeForSlug,
+        FieldTypesSource fieldTypes,
         DecryptValue decryptValue,
         BinaryFetch? binaryFetch = null)
     {
@@ -435,7 +447,7 @@ public sealed record Change(
         {
             // Reuse the Value typing path so feed + connection produce identical typed values
             // (incl. the same lazy BinaryHandle for binaries).
-            value = Value.TypedValue(obj, typeForSlug(slug), decryptValue, binaryFetch);
+            value = Value.TypedValue(obj, typeForSlug(slug), fieldTypes, decryptValue, binaryFetch);
         }
 
         // message_received carries the connection to answer on, the ack boundary, the person's
@@ -491,6 +503,7 @@ public sealed record Change(
     public static List<Change> ListFromApi(
         Node body,
         TypeForSlug typeForSlug,
+        FieldTypesSource fieldTypes,
         DecryptValue decryptValue,
         BinaryFetch? binaryFetch = null)
     {
@@ -499,7 +512,7 @@ public sealed record Change(
             : body.Kind == NodeKind.List ? body.AsList() : new List<Node>();
         return items
             .Where(o => o.Kind == NodeKind.Object)
-            .Select(o => FromApi(o, typeForSlug, decryptValue, binaryFetch))
+            .Select(o => FromApi(o, typeForSlug, fieldTypes, decryptValue, binaryFetch))
             .ToList();
     }
 }

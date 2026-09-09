@@ -116,10 +116,6 @@ public sealed class OAuthClient
     /// <summary>The hosted consent surface. Native apps claim this https link; web is the fallback.</summary>
     public const string DefaultAuthorizeUrl = "https://web.allme.fyi/auth";
 
-    // Binary field types can't be requested as claims — the ID-document subtypes are binary too,
-    // so no ID document ever reaches this surface.
-    private static readonly HashSet<string> NonClaimable = new()
-        { "photo", "document", "legal_document", "passport", "photo_id", "drivers_license" };
     private const int MaxClaims = 15;
     private static readonly HashSet<string> Modes = new() { "signin", "one_time", "connect", "2fa_enroll" };
     private static readonly HashSet<string> ResponseModes = new() { "redirect", "detached" };
@@ -154,6 +150,13 @@ public sealed class OAuthClient
         new(Config.FromIdwEnv(), transport);
 
     /// <summary>Build the consent-screen URL — the "Sign in with allme" button target.</summary>
+    /// <remarks>
+    /// Claims are validated for what this client can answer for itself — a name, no duplicate name,
+    /// at most 15 — and are otherwise sent as written. WHICH TYPES ARE CLAIMABLE IS THE SERVER'S
+    /// ANSWER: this URL is built before any token exists and an identity app reads no registry, so a
+    /// claim of a type the server does not accept comes back as <c>invalid_request</c> rather than
+    /// being dropped here.
+    /// </remarks>
     public string AuthorizeUrl(
         string mode,
         IEnumerable<Claim>? claims = null,
@@ -193,15 +196,16 @@ public sealed class OAuthClient
         var seen = new HashSet<string>();
         foreach (var c in claims)
         {
-            if (string.IsNullOrEmpty(c.Type) || NonClaimable.Contains(c.Type)) continue;
             // `Name` is the claim's identity and it is mandatory. Refused HERE rather than
-            // left to the API, so the integration error surfaces at the call that made it.
+            // left to the API, so the integration error surfaces at the call that made it. The
+            // TYPE is not filtered: what a claim may be typed as is registry data the server owns,
+            // and this client holds none of it.
             var name = (c.Name ?? string.Empty).Trim();
             if (name.Length == 0)
                 throw new ConfigException("every claim must carry a `Name`");
             if (!seen.Add(name))
                 throw new ConfigException($"duplicate claim name '{name}'");
-            var entry = new Dictionary<string, object> { ["name"] = name, ["type"] = c.Type };
+            var entry = new Dictionary<string, object> { ["name"] = name, ["type"] = c.Type ?? string.Empty };
             if (!string.IsNullOrEmpty(c.Suggest)) entry["suggest"] = c.Suggest;
             if (c.Required) entry["required"] = true;
             if (c.Verified) entry["verified"] = true;

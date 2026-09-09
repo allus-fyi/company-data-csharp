@@ -21,11 +21,11 @@ public class VerifiedTests
     public void Value_Verified()
     {
         var (salt, pt) = ("0011223344556677", "alice@example.com");
-        var match = Value.FromApi(Node.FromJsonString($"{{\"value\":\"{pt}\",\"live\":true,\"verified_hash\":\"{H(salt, pt)}\",\"verified_salt\":\"{salt}\"}}"), "email", _ => pt, null);
+        var match = Value.FromApi(Node.FromJsonString($"{{\"value\":\"{pt}\",\"live\":true,\"verified_hash\":\"{H(salt, pt)}\",\"verified_salt\":\"{salt}\"}}"), "email", Allus.CompanyData.Tests.FieldValidationTests.Registry, _ => pt, null);
         Assert.True(match.Verified);
-        var mismatch = Value.FromApi(Node.FromJsonString($"{{\"value\":\"{pt}\",\"live\":true,\"verified_hash\":\"deadbeef\",\"verified_salt\":\"{salt}\"}}"), "email", _ => pt, null);
+        var mismatch = Value.FromApi(Node.FromJsonString($"{{\"value\":\"{pt}\",\"live\":true,\"verified_hash\":\"deadbeef\",\"verified_salt\":\"{salt}\"}}"), "email", Allus.CompanyData.Tests.FieldValidationTests.Registry, _ => pt, null);
         Assert.False(mismatch.Verified);
-        var absent = Value.FromApi(Node.FromJsonString($"{{\"value\":\"{pt}\",\"live\":true}}"), "email", _ => pt, null);
+        var absent = Value.FromApi(Node.FromJsonString($"{{\"value\":\"{pt}\",\"live\":true}}"), "email", Allus.CompanyData.Tests.FieldValidationTests.Registry, _ => pt, null);
         Assert.False(absent.Verified);
     }
 }

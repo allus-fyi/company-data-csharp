@@ -72,12 +72,12 @@ public class OAuthTests
     {
         var c = new OAuthClient(IdwCfg(), new QueueTransport());
         // Every claim carries a mandatory Name — the identity everything downstream is keyed by.
+        // The TYPE is passed through as written: which types are claimable is registry data the
+        // server owns, and a type it does not accept comes back as invalid_request.
         var claims = new[]
         {
             new Claim("email", "email", "email_personal"),
-            new Claim("avatar", "photo"),
             new Claim("phone", "phone", Required: true),
-            new Claim("nothing", ""),
         };
         var (_, q) = ParseUrl(c.AuthorizeUrl("one_time", claims));
         using var doc = JsonDocument.Parse(q["claims"]);

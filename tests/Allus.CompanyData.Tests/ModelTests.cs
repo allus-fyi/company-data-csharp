@@ -96,7 +96,7 @@ public class ModelTests
         });
         var identity = Obj(new() { ["display_name"] = S("Anna"), ["connected_at"] = S("2026-06-10T00:00:00Z") });
 
-        var conn = Connection.FromApi(detail, TypeResolver(), DecryptWith(key), identity: identity);
+        var conn = Connection.FromApi(detail, TypeResolver(), FieldValidationTests.Registry, DecryptWith(key), identity: identity);
 
         Assert.Equal("csc-1", conn.Id);
         Assert.Equal("person-1", conn.PersonId);
@@ -152,7 +152,7 @@ public class ModelTests
                 }),
             }),
         });
-        var conn = Connection.FromApi(detail, _ => "photo", DecryptWith(key), fetch);
+        var conn = Connection.FromApi(detail, _ => "photo", FieldValidationTests.Registry, DecryptWith(key), fetch);
         var handle = Assert.IsType<BinaryHandle>(conn.Values["logo"].ValueObj);
         Assert.Null(capturedUrl); // not fetched until .BytesAsync()
 
@@ -173,7 +173,7 @@ public class ModelTests
             ["user_id"] = S("person-1"),
             ["values"] = Obj(new() { ["work_email"] = Obj(new() { ["value"] = Vector.TextWrapperNode, ["live"] = S(true) }) }),
         });
-        var conn = Connection.FromApi(detail, _ => "email", DecryptWith(key));
+        var conn = Connection.FromApi(detail, _ => "email", FieldValidationTests.Registry, DecryptWith(key));
         var serialized = JsonSerializer.Serialize(conn.Raw);
         Assert.DoesNotContain("field_id", serialized);
         Assert.Equal(new[] { "work_email" }, conn.Values.Keys);
@@ -202,7 +202,7 @@ public class ModelTests
                 }),
             }),
         });
-        var changes = Change.ListFromApi(body, _ => "email", DecryptWith(key));
+        var changes = Change.ListFromApi(body, _ => "email", FieldValidationTests.Registry, DecryptWith(key));
 
         var f = changes[0];
         Assert.Equal("chg-42", f.Id);
@@ -240,7 +240,7 @@ public class ModelTests
         });
         BinaryFetch fetch = (url, ct) =>
             Task.FromResult(new BinaryFetchResult(Encrypted: true, Wrapper: Vector.BinaryWrapperNode));
-        var chg = Change.ListFromApi(body, _ => "photo", DecryptWith(key), fetch)[0];
+        var chg = Change.ListFromApi(body, _ => "photo", FieldValidationTests.Registry, DecryptWith(key), fetch)[0];
         var handle = Assert.IsType<BinaryHandle>(chg.ValueObj);
         Assert.Equal(Vector.InnerFullSha256, Sha256Hex(await handle.BytesAsync()));
     }
@@ -259,7 +259,7 @@ public class ModelTests
                 }),
             }),
         });
-        var chg = Change.ListFromApi(body, _ => "email", _ => "")[0];
+        var chg = Change.ListFromApi(body, _ => "email", FieldValidationTests.Registry, _ => "")[0];
         Assert.Equal("consent_accepted", chg.Event);
         Assert.Equal("work_email", chg.Slug);
         Assert.Null(chg.ValueObj); // consent events carry no value
@@ -310,7 +310,7 @@ public class ModelTests
                 }),
             }),
         });
-        var changes = Change.ListFromApi(body, _ => null, DecryptWith(key));
+        var changes = Change.ListFromApi(body, _ => null, FieldValidationTests.Registry, DecryptWith(key));
         Assert.Equal("ABC123", changes[0].ShareCode);
         Assert.Null(changes[1].ShareCode);
     }
@@ -334,7 +334,7 @@ public class ModelTests
                 }),
             }),
         });
-        var chg = Change.ListFromApi(body, _ => null, DecryptWith(key))[0];
+        var chg = Change.ListFromApi(body, _ => null, FieldValidationTests.Registry, DecryptWith(key))[0];
         Assert.Equal("document_status_changed", chg.Event);
         Assert.Equal("doc-9", chg.DocumentId);
         Assert.Equal("ended", chg.Status);
@@ -362,7 +362,7 @@ public class ModelTests
                 }),
             }),
         });
-        var chg = Change.ListFromApi(body, _ => null, DecryptWith(key))[0];
+        var chg = Change.ListFromApi(body, _ => null, FieldValidationTests.Registry, DecryptWith(key))[0];
         Assert.Equal("document_status_changed", chg.Event);
         Assert.Equal("signed", chg.Action);
         Assert.Equal("doc-7", chg.DocumentId);
@@ -389,7 +389,7 @@ public class ModelTests
                 }),
             }),
         });
-        var chg = Change.ListFromApi(body, _ => null, DecryptWith(key))[0];
+        var chg = Change.ListFromApi(body, _ => null, FieldValidationTests.Registry, DecryptWith(key))[0];
         Assert.Equal("cancelled", chg.Action);
         Assert.Equal("Too expensive", chg.Note);
         Assert.Equal("ended", chg.Status);
@@ -421,7 +421,7 @@ public class ModelTests
                 }),
             }),
         });
-        var changes = Change.ListFromApi(body, _ => null, DecryptWith(key));
+        var changes = Change.ListFromApi(body, _ => null, FieldValidationTests.Registry, DecryptWith(key));
 
         Assert.Equal("connection_request_accepted", changes[0].Event);
         Assert.Equal("req-9", changes[0].RequestId);
@@ -513,7 +513,7 @@ public class ModelTests
                 Obj(new() { ["id"] = S("chg-2"), ["event"] = S("connection_created"), ["person_user_id"] = S("p-2"), ["at"] = S("2026-07-07T12:00:00Z") }),
             }),
         });
-        var changes = Change.ListFromApi(body, _ => null, _ => "");
+        var changes = Change.ListFromApi(body, _ => null, FieldValidationTests.Registry, _ => "");
         Assert.Equal("company", changes[0].CustomerType);
         Assert.Null(changes[1].CustomerType);
     }
@@ -523,12 +523,12 @@ public class ModelTests
     {
         var conn = Connection.FromApi(
             Obj(new() { ["connection_id"] = S("c-1"), ["user_id"] = S("co-9"), ["customer_type"] = S("company"), ["share_code"] = S("PARTNER"), ["values"] = Obj(new()) }),
-            _ => null, _ => "");
+            _ => null, FieldValidationTests.Registry, _ => "");
         Assert.Equal("company", conn.CustomerType);
         Assert.Equal("PARTNER", conn.ShareCode);
         var bare = Connection.FromApi(
             Obj(new() { ["connection_id"] = S("c-2"), ["user_id"] = S("p-1"), ["values"] = Obj(new()) }),
-            _ => null, _ => "");
+            _ => null, FieldValidationTests.Registry, _ => "");
         Assert.Null(bare.CustomerType);
         Assert.Null(bare.ShareCode);
     }

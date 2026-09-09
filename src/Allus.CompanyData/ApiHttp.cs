@@ -247,6 +247,12 @@ public sealed class ApiHttp
     internal Node ParseResponse(HttpResult resp) => ParseBody(resp, _config.Format == "xml");
 
     /// <summary>
+    /// Parse a response body as JSON whatever <c>Format</c> this client speaks, for a route that
+    /// answers JSON to every caller rather than honouring the configured format.
+    /// </summary>
+    internal Node ParseResponseAsJson(HttpResult resp) => ParseBody(resp, false);
+
+    /// <summary>
     /// GET/POST/PUT/DELETE → a parsed <see cref="Node"/>. Thin wrapper over
     /// <see cref="RequestCoreAsync"/> that additionally parses the successful body as JSON/XML.
     /// </summary>

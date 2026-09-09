@@ -35,8 +35,8 @@ internally; you'll normally use the client methods inside an app.
 
 ```csharp
 Webhooks.VerifyWebhook(rawBody, headers, config) -> bool
-Webhooks.ParseWebhook(rawBody, headers, config, typeForSlug, decryptValue, binaryFetch = null, accountKey = null) -> Change
-Webhooks.HandleWebhook(rawBody, headers, config, typeForSlug, decryptValue, binaryFetch = null, accountKey = null) -> Change
+Webhooks.ParseWebhook(rawBody, headers, config, typeForSlug, fieldTypes, decryptValue, binaryFetch = null, accountKey = null) -> Change
+Webhooks.HandleWebhook(rawBody, headers, config, typeForSlug, fieldTypes, decryptValue, binaryFetch = null, accountKey = null) -> Change
 ```
 
 ## In a web route
