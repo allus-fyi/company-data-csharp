@@ -294,6 +294,13 @@ public static class Crypto
         }
     }
 
+    /// <summary>SHA-256 of raw PDF bytes, lowercase hex — the PlainSha256 a signable file
+    /// document's create call and every sign/accept act must agree on. Exposed so a caller can
+    /// precompute or verify it; CreateDocumentAsync calls this itself when a PlainSha256
+    /// override is not given.</summary>
+    public static string ComputePlainSha256(byte[] data)
+        => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data)).ToLowerInvariant();
+
     /// <summary>True iff sha256(salt ‖ plaintext) == expectedHash (hex). Consumers recompute
     /// this from the plaintext they just decrypted and trust the verified flag ONLY on a match.</summary>
     public static bool HashMatches(string salt, string expectedHash, string plaintext)

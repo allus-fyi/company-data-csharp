@@ -84,6 +84,25 @@ internal static class ModelCoerce
         };
     }
 
+    /// <summary>
+    /// Convert one signature-map entry to its object graph, coercing the one
+    /// schema-defined boolean it carries. The map stays untyped (matching every
+    /// existing signature field), but signer_name_verified is a boolean in the
+    /// schema — XML carries it as the string "false"/"true", and a caller
+    /// testing that raw string for truthiness reads a false verification as
+    /// verified. Coerce it the same way every other boolean field on this
+    /// transport is coerced.
+    /// </summary>
+    public static object? NormalizedSignatureEntry(Node n)
+    {
+        var graph = n.ToObjectGraph();
+        if (graph is Dictionary<string, object?> map && n.Has("signer_name_verified"))
+        {
+            map["signer_name_verified"] = CoerceBool(n.Get("signer_name_verified"));
+        }
+        return graph;
+    }
+
     public static bool? CoerceBool(Node node)
     {
         if (node.IsNull) return null;
@@ -431,6 +450,20 @@ public sealed record Change(
     /// <summary>Set on <c>message_received</c> — the DECRYPTED message text.</summary>
     public string? MessageBody { get; init; }
 
+    /// <summary>Set on <c>document_status_changed</c> — when the platform seal was applied; null until sealed.</summary>
+    public DateTimeOffset? SealedAt { get; init; }
+
+    /// <summary>Set on <c>document_status_changed</c> — SHA-256 of the document's unencrypted PDF bytes; null on a JSON contract.</summary>
+    public string? PlainSha256 { get; init; }
+
+    /// <summary>Set on <c>document_status_changed</c> — the signature's own signer evidence.</summary>
+    public string? SignerFirstName { get; init; }
+
+    public string? SignerLastName { get; init; }
+
+    /// <summary>True iff the submitted name matched the signer's verified ID name; null when unset.</summary>
+    public bool? SignerNameVerified { get; init; }
+
     public static Change FromApi(
         Node obj,
         TypeForSlug typeForSlug,
@@ -497,6 +530,11 @@ public sealed record Change(
             MessageId = isMessage ? obj.Get("message_id").AsString() : null,
             PersonPublicKey = isMessage ? obj.Get("person_public_key").AsString() : null,
             MessageBody = messageBody,
+            SealedAt = ev == "document_status_changed" ? ModelCoerce.ParseIsoDt(obj.Get("sealed_at").AsString()) : null,
+            PlainSha256 = ev == "document_status_changed" ? obj.Get("plain_sha256").AsString() : null,
+            SignerFirstName = ev == "document_status_changed" ? obj.Get("signer_first_name").AsString() : null,
+            SignerLastName = ev == "document_status_changed" ? obj.Get("signer_last_name").AsString() : null,
+            SignerNameVerified = ev == "document_status_changed" ? ModelCoerce.CoerceBool(obj.Get("signer_name_verified")) : null,
         };
     }
 
@@ -543,7 +581,12 @@ public sealed record Document(
     DateTimeOffset? UpdatedAt,
     bool RequiresSignature = false,
     bool RequiresAcceptance = false,
-    IReadOnlyList<object?>? Signatures = null,  // contract sign/accept audit trail (company-side reads only)
+    string? PlainSha256 = null,      // SHA-256 of the unencrypted PDF bytes; null on a JSON contract
+    DateTimeOffset? SealedAt = null, // when the platform seal was applied; null until sealed
+    // Contract sign/accept audit trail (company-side reads only), one entry per signature: action,
+    // method, content_sha256, plain_sha256, signer_first_name, signer_last_name,
+    // signer_name_verified, ip, user_agent, created_at.
+    IReadOnlyList<object?>? Signatures = null,
     // Present only on a contract-flow run-participant document: the run's ordered signature
     // summary, one entry per participant owing an act — each
     // {party_key, document_id, position, status, action, acted_at}. Null on any other document.
@@ -605,8 +648,10 @@ public sealed record Document(
             UpdatedAt: ModelCoerce.ParseIsoDt(obj.Get("updated_at").AsString()),
             RequiresSignature: ModelCoerce.CoerceBool(obj.Get("requires_signature")) ?? false,
             RequiresAcceptance: ModelCoerce.CoerceBool(obj.Get("requires_acceptance")) ?? false,
+            PlainSha256: obj.Get("plain_sha256").AsString(),
+            SealedAt: ModelCoerce.ParseIsoDt(obj.Get("sealed_at").AsString()),
             Signatures: obj.Has("signatures") && obj.Get("signatures").Kind == NodeKind.List
-                ? obj.Get("signatures").AsList().Select(n => n.ToObjectGraph()).ToList()
+                ? obj.Get("signatures").AsList().Select(ModelCoerce.NormalizedSignatureEntry).ToList()
                 : new List<object?>(),
             RunSignatures: obj.Has("run_signatures") && obj.Get("run_signatures").Kind == NodeKind.List
                 ? obj.Get("run_signatures").AsList().Select(n => n.ToObjectGraph()).ToList()

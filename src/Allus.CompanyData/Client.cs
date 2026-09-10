@@ -690,6 +690,7 @@ public sealed class Client : IDisposable
         string? fileName = null,
         bool requiresSignature = false,
         bool requiresAcceptance = false,
+        string? plainSha256 = null,
         object? metadata = null,
         string? status = null,
         CancellationToken ct = default)
@@ -753,6 +754,7 @@ public sealed class Client : IDisposable
         // file: create the metadata row first, then upload bytes to /{id}/file.
         if (fileBytes is null)
             throw new ConfigException("fileBytes is required for payloadKind='file'");
+        body["plain_sha256"] = !string.IsNullOrEmpty(plainSha256) ? plainSha256 : Crypto.ComputePlainSha256(fileBytes);
         var createdFile = await _http.PostAsync(DocumentsPath, jsonBody: body, ct: ct).ConfigureAwait(false);
         var doc = Document.FromApi(DocObj(createdFile), DecryptValueImpl);
         // The metadata row exists before the bytes are uploaded; if the upload fails, best-effort

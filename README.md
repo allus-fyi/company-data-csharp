@@ -681,23 +681,45 @@ var contract = await client.CreateDocumentAsync(
     status:       "ready_to_sign");
 
 // PER-PERSON FILE — the bytes are encrypted to the recipient before upload.
+// plainSha256 (SHA-256 of the raw PDF bytes) is computed for you when omitted;
+// required by the server for a signable file document (requiresSignature/
+// requiresAcceptance), ignored for payloadKind="json".
 byte[] pdf = await File.ReadAllBytesAsync("/tmp/agreement.pdf");
 var signed = await client.CreateDocumentAsync(
-    name:         "Signed agreement — Alice",
-    payloadKind:  "file",
-    kind:         "document",
-    personUserId: "019yyyyyyyyyyyyyyyyyyyyyyyyy",
-    fileBytes:    pdf,
-    fileMime:     "application/pdf");
+    name:              "Signed agreement — Alice",
+    payloadKind:       "file",
+    kind:              "document",
+    personUserId:      "019yyyyyyyyyyyyyyyyyyyyyyyyy",
+    fileBytes:         pdf,
+    fileMime:          "application/pdf",
+    requiresSignature: true
+    // plainSha256: Crypto.ComputePlainSha256(pdf), // optional — computed for you otherwise
+    );
 
 Console.WriteLine($"{contract.Id} {contract.Status} (private={contract.IsPrivate})");
 ```
 
 `CreateDocumentAsync` returns a `Document(Id, Kind, Name, Description, Status,
-PayloadKind, IsPrivate, ValueObj, Metadata, CreatedAt, UpdatedAt)`. For a
-`payload_kind="json"` document, call `doc.Json()` to get the plaintext object back
-(a per-person doc is decrypted with your service key transparently; a broadcast doc
-is already plaintext).
+PayloadKind, IsPrivate, ValueObj, Metadata, CreatedAt, UpdatedAt, PlainSha256,
+SealedAt, Signatures)`. For a `payload_kind="json"` document, call `doc.Json()`
+to get the plaintext object back (a per-person doc is decrypted with your
+service key transparently; a broadcast doc is already plaintext).
+
+**The document seal.** Completing every required signature/acceptance on a
+signable document is not the same as sealing it. When the last one is recorded
+the platform *attempts*, on that same request, to append a Signatures page and
+sign the whole PDF with a platform certificate, replacing every party's copy
+with the sealed one. The attempt can fail (no PDF bytes on the completing act,
+a byte mismatch, the sealing service unavailable, or a custodian-completed ward
+act) without affecting the signatures or the document's completed status — it
+is simply left unsealed, and any party can seal it afterwards from their own
+device or the owning company's portal (no SDK call triggers a seal).
+`doc.SealedAt` is `null` until a seal actually succeeds; `doc.PlainSha256` is
+the SHA-256 of the document's unencrypted PDF bytes (`null` on a json document,
+and on a file document with no stored plaintext hash). Each `doc.Signatures` entry
+additionally carries `plain_sha256`, `signer_first_name`, `signer_last_name`
+and `signer_name_verified` beside its existing `action`/`method`/
+`content_sha256`/`ip`/`user_agent`/`created_at` keys.
 
 ### List, fetch, update, delete
 
@@ -769,7 +791,11 @@ await client.TriggerFlowRunAsync(flowId, connection.Id!, bindings);
 
 When a recipient acts on a document (e.g. signs it), the platform emits a
 **`document_status_changed`** change event. It carries `Change.DocumentId` and
-`Change.Status` (no slot/slug/value), so handle it alongside the field events:
+`Change.Status` (no slot/slug/value), so handle it alongside the field events. A
+transition to `active` additionally carries `Change.SealedAt`,
+`Change.PlainSha256`, `Change.SignerFirstName`, `Change.SignerLastName` and
+`Change.SignerNameVerified` — the same seal state the document read carries, so
+you never need a follow-up `DocumentAsync(id)` call just to learn a run sealed:
 
 ```csharp
 async Task Handle(Change change)
