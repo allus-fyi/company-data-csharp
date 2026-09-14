@@ -103,36 +103,68 @@ A lazy handle for a binary value. No network or decryption happens at constructi
 public sealed class BinaryHandle
 {
     public string? ValueUrl      { get; }                              // the opaque slot-keyed file URL (read-only)
-    public string? ContentType   { get; }                              // what the bytes arrived as; null until fetched
-    public string? ContentSha256 { get; }                              // the platform's X-Allus-Content-Sha256; null until fetched
+    public string? ContentType   { get; }                              // what the answer arrived as; null until fetched
+    public string? ContentSha256 { get; }                              // the platform's X-Allus-Content-Sha256 for the SERVED ARTIFACT
     public Task<byte[]> BytesAsync(CancellationToken ct = default);     // fetch (if needed) → the primary file bytes
     public Task<int>    SaveAsync(string path, CancellationToken ct);   // write BytesAsync() to path (atomic); returns bytes written
+    public Task<IReadOnlyList<BinaryPage>> PagesAsync(CancellationToken ct = default);            // the envelope's pages, in order
+    public Task<IReadOnlyDictionary<string, string?>> MetadataAsync(CancellationToken ct = default); // the type's declared entries
 }
+
+public sealed record BinaryPage(
+    string? Label,   // front | back | additional
+    string? Name,    // the original filename
+    string? Mime,    // the server-derived media type
+    byte[]  Bytes);  // the decoded page bytes
 ```
 
-The file endpoint has **two 200 shapes**, and which one arrives is the person's
-choice, not yours: it depends on whether their source field is private, and nothing
-in the API announces it in advance. The handle absorbs the difference — the same
-`.BytesAsync()` returns the file either way.
+The file endpoint has **three 200 shapes**, and which one arrives is not yours to
+choose: it depends on whether the person's source field is private AND on the TYPE of
+the field they answered with, and nothing in the API announces either in advance. The
+handle absorbs the difference.
 
-On first `.BytesAsync()`/`.SaveAsync()` it GETs the slot-keyed file endpoint and
-classifies the response on its `Content-Type` (never by sniffing the body):
+On the first `.BytesAsync()`/`.PagesAsync()`/`.MetadataAsync()`/`.SaveAsync()` it GETs
+the slot-keyed file endpoint and classifies the response — the raw-bytes shape on its
+`Content-Type` (never by sniffing the body), the two JSON ones on the body's
+`encrypted` member:
 
-* **JSON/XML content type, or none at all** → the encrypted shape,
-  `{"encrypted": true, "value": <wrapper>}`:
-  1. Decrypt the inner `{"_enc":1,…}` wrapper with the service key → a JSON file-envelope string (`{"full": "data:…", "thumb": …}` for photos, `{"file": "data:…", …}` for documents).
-  2. Base64-decode the primary data URI (`full` for photos, `file` for documents) → the file bytes.
-* **anything else** (`image/jpeg`, `application/pdf`, …) → the plaintext shape: the
-  body already **is** the file. Nothing is decrypted and no service key is needed.
+* **JSON/XML content type, or none at all, with `encrypted: true`** → the encrypted
+  shape, `{"encrypted": true, "value": <wrapper>}`: decrypt the inner `{"_enc":1,…}`
+  wrapper with the service key → the JSON ENVELOPE string.
+* **JSON/XML content type with `encrypted: false` and a string `value`** → the envelope
+  shape: that same envelope string in the clear, for a non-private source whose type
+  stores more than one file or declares metadata entries (the ID-document subtypes and
+  `legal_document`). Nothing is decrypted.
+* **anything else** (`image/jpeg`, `application/pdf`, …) → the plaintext-bytes shape:
+  the body already **is** the file. Nothing is decrypted and no service key is needed.
 
-A missing content type falls back to the encrypted shape deliberately: mistaking a
-wrapper for file bytes writes ciphertext to disk as if it were the document and
-nothing complains, while mistaking bytes for a wrapper fails loudly at the parse.
+A missing content type falls back to the JSON path deliberately: mistaking a wrapper
+for file bytes writes ciphertext to disk as if it were the document and nothing
+complains, while mistaking bytes for a wrapper fails loudly at the parse. A JSON body
+that does not carry `encrypted: false` with a string `value` is the wrapper arm,
+which is what the bare-wrapper routes (a company's own contract copy, its run slot
+file) answer with.
+The envelope is a photo's `{"full": "data:…", "thumb": …}`, a single-file document's
+`{"file": "data:…", …}`, or a multi-page document's
+`{"pages": [{"label": …, "file": "data:…", …}], …}`, with every entry the type declares
+beside it.
 
-Either way the bytes are cached on the handle (repeated calls don't re-fetch), and
-`ContentSha256` holds the response's `X-Allus-Content-Sha256` — the sha256 of
-exactly the bytes returned. There is no variant selection: one slot has one byte
-sequence and therefore one digest.
+`.PagesAsync()` answers the pages of a multi-page envelope in order, and an empty list
+for a single-file one. `.MetadataAsync()` answers every envelope member other than
+`pages`, `file`, `full`, `thumb`, `original_name`, `mime_type` and `size`, so a
+passport's `document_number`, `expiry_date`, `issuing_country` and `name` are all there;
+**it carries no ordering guarantee** — read the envelope string yourself if you need the
+declared order. **`.BytesAsync()`/`.SaveAsync()` throw
+`DecryptException("multi-page envelope: use pages")` on a multi-page envelope** rather
+than handing back the front page as though it were the whole document.
+
+All of the accessors share ONE lazy fetch: whichever is called first performs it, and
+the result is cached (repeated calls don't re-fetch). The digest header
+`X-Allus-Content-Sha256` is the sha256 of the **served artifact** — the raw bytes on the
+bytes shape, the served `value` string on either JSON shape — not "the sha256 of what
+`.BytesAsync()` returns", which is false on a multi-page envelope. There is no variant
+selection.
+
 
 `.SaveAsync()` writes crash-safely: a temp file in the destination directory is
 written, flushed to disk (`FileStream.Flush(flushToDisk: true)`), then atomically

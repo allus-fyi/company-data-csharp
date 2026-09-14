@@ -226,9 +226,10 @@ public sealed class ApiHttp
     /// <summary>
     /// GET <paramref name="path"/> returning the whole 2xx <see cref="HttpResult"/> — status, headers
     /// AND raw body, with no parse.
-    /// <para>The company-facing binary file endpoints have two 200 shapes (a JSON wrapper for an
-    /// encrypted answer, raw file bytes for a plaintext one) that are told apart by
-    /// <c>Content-Type</c>, and both carry an <c>X-Allus-Content-Sha256</c> digest header. Neither
+    /// <para>The company-facing binary file endpoints have three 200 shapes (a JSON wrapper for an
+    /// encrypted answer, a JSON plaintext envelope, raw file bytes) — the bytes shape told apart by
+    /// <c>Content-Type</c> and the two JSON ones by the body's <c>encrypted</c> member — and all
+    /// three carry an <c>X-Allus-Content-Sha256</c> digest header. Neither
     /// <see cref="GetAsync"/> (which parses) nor <see cref="GetRawAsync"/> (which drops the headers)
     /// can express that, so this hands the caller the response itself. Auth/refresh/retry and error
     /// mapping are identical.</para>
@@ -251,6 +252,14 @@ public sealed class ApiHttp
     /// answers JSON to every caller rather than honouring the configured format.
     /// </summary>
     internal Node ParseResponseAsJson(HttpResult resp) => ParseBody(resp, false);
+
+    /// <summary>
+    /// Parse a response body by what the RESPONSE says it is, for a route whose structured arms are
+    /// <c>application/json</c> whatever the client speaks — the binary file routes. A body a client
+    /// configured for XML parsed as XML would be unreadable there.
+    /// </summary>
+    internal Node ParseResponseByContentType(HttpResult resp) =>
+        ParseBody(resp, (resp.Header("Content-Type") ?? "").Contains("xml", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// GET/POST/PUT/DELETE → a parsed <see cref="Node"/>. Thin wrapper over

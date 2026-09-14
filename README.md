@@ -469,41 +469,57 @@ var dob  = (DateOnly)conn.Values["birthday"].ValueObj!;                         
 ### Binary fields — the lazy `BinaryHandle`
 
 A photo/document value is a `BinaryHandle`. Nothing is fetched or decrypted until
-you call `.BytesAsync()` or `.SaveAsync()`:
+you call `.BytesAsync()`, `.PagesAsync()`, `.MetadataAsync()` or `.SaveAsync()`:
 
 ```csharp
 var handle = (BinaryHandle)conn.Values["passport_scan"].ValueObj!;  // no network yet
 
-byte[] data = await handle.BytesAsync();                  // GET the slot file → the file bytes
-int    n    = await handle.SaveAsync("/tmp/passport.jpg"); // same, atomically written to disk; returns bytes written
+IReadOnlyList<BinaryPage> pages = await handle.PagesAsync();   // GET the slot file → every page, in order
+IReadOnlyDictionary<string, string?> meta = await handle.MetadataAsync(); // the entries the type declares
+byte[] data = await handle.BytesAsync();                  // the primary file bytes (single-file answers)
+int    n    = await handle.SaveAsync("/tmp/contract.pdf"); // same, atomically written to disk; returns bytes written
 Console.WriteLine(handle.ValueUrl);                        // the opaque slot-keyed URL it fetches from
-Console.WriteLine(handle.ContentType);                     // what the bytes arrived as, once fetched
+Console.WriteLine(handle.ContentType);                     // what the answer arrived as, once fetched
 Console.WriteLine(handle.ContentSha256);                   // the platform's X-Allus-Content-Sha256
 ```
 
-`.BytesAsync()` GETs the slot-keyed file endpoint and gives you the file bytes.
-**That endpoint has two 200 shapes, and which one you get is the person's choice,
-not yours** — it depends on whether their source field is private, they can change
-it at any time, and nothing announces it in advance:
+**The slot-keyed file endpoint has three 200 shapes, and which one you get is not
+yours to choose** — it depends on whether the person's source field is private AND on
+the type of the field they answered with, both can change, and nothing announces
+either in advance:
 
 * **private source** → `application/json` `{"encrypted": true, "value": <wrapper>}`.
-  The SDK decrypts the wrapper with your service key, parses the inner JSON
-  envelope (`{"full": "data:…"}` for photos, `{"file": "data:…"}` for documents)
-  and base64-decodes the data URI into the file bytes.
-* **plaintext source** → the file's own `Content-Type` (`image/jpeg`,
-  `application/pdf`, …) and the body **is** the file. Nothing to decrypt.
+  The SDK decrypts the wrapper with your service key into the JSON ENVELOPE string.
+* **non-private source whose type stores more than one file or declares metadata
+  entries** (the ID-document subtypes and `legal_document`) → `application/json`
+  `{"encrypted": false, "value": "<envelope>"}` — that same envelope in the clear.
+  Nothing to decrypt.
+* **every other non-private source** → the file's own `Content-Type` (`image/jpeg`,
+  `application/pdf`, …) and the body **is** the file.
 
-The handle absorbs the difference — you call `.BytesAsync()` either way. The result
-is cached on the handle, so repeated calls don't re-fetch. `.SaveAsync()` writes
-atomically (temp file → flush-to-disk → atomic move), so a crash mid-write never
-leaves a truncated file.
+The envelope is a photo's `{"full": "data:…", "thumb": …}`, a single-file document's
+`{"file": "data:…", …}`, or a multi-page document's
+`{"pages": [{"label": …, "file": "data:…", …}], …}`, with every declared entry beside
+it. `.PagesAsync()` answers the pages (an empty list for a single-file answer) and
+`.MetadataAsync()` the declared entries (`document_number`, `expiry_date`,
+`issuing_country`, `name`, …). **`.BytesAsync()`/`.SaveAsync()` throw
+`DecryptException("multi-page envelope: use pages")` on a multi-page envelope** rather
+than handing back the front page as though it were the whole document.
+`.MetadataAsync()` **carries no ordering guarantee**; read the envelope string
+yourself if you need the declared order.
 
-Every 200 also carries `X-Allus-Content-Sha256` — the sha256 of exactly the bytes
-returned — surfaced as `handle.ContentSha256` (with `handle.ContentType` for the
+The handle absorbs the difference. All four accessors share ONE lazy fetch and the
+result is cached, so repeated calls don't re-fetch. `.SaveAsync()` writes atomically
+(temp file → flush-to-disk → atomic move), so a crash mid-write never leaves a
+truncated file.
+
+Every 200 also carries `X-Allus-Content-Sha256` — the sha256 of the **served
+artifact**, the raw bytes on the bytes shape and the served `value` string on either
+JSON shape — surfaced as `handle.ContentSha256` (with `handle.ContentType` for the
 media type). Record it and you can later show your archived copy has not drifted.
 It is the platform's word, not a signature: it proves agreement with the platform's
 record, not anything to a third party who doubts that record. There is **no**
-variant selection — one slot has one byte sequence and therefore one digest.
+variant selection.
 
 A frozen (Share-once) answer is retained for 90 days. After that the endpoint
 returns **410** `company_data.file_expired`; the SDK raises `ApiException` whose

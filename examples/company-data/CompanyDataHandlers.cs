@@ -606,9 +606,27 @@ public sealed class CompanyDataHandlers
         _ => v, // dictionaries / lists (structured values) — serialized as-is
     };
 
+    /// <summary>
+    /// The one-line descriptor every SDK example prints for a fetched binary.
+    /// <para>The PAGE COUNT for a multi-page envelope (whose <c>BytesAsync()</c> has no single
+    /// answer), the byte length otherwise, and the declared metadata keys whenever the envelope
+    /// carries any — so a <c>legal_document</c> shows its byte length AND its
+    /// <c>document_number</c>/<c>expiry_date</c>. Keys are sorted, because the metadata map carries
+    /// no ordering guarantee.</para>
+    /// </summary>
     private static string BinaryDescriptor(BinaryHandle bh)
     {
-        try { return $"[binary {bh.BytesAsync().GetAwaiter().GetResult().Length} bytes]"; }
+        try
+        {
+            var pages = bh.PagesAsync().GetAwaiter().GetResult();
+            var head = pages.Count > 0
+                ? $"binary {pages.Count} pages"
+                : $"binary {bh.BytesAsync().GetAwaiter().GetResult().Length} bytes";
+            var meta = bh.MetadataAsync().GetAwaiter().GetResult();
+            if (meta.Count > 0)
+                head += "; meta: " + string.Join(", ", meta.Keys.OrderBy(k => k, StringComparer.Ordinal));
+            return $"[{head}]";
+        }
         catch (Exception) { return "[binary value]"; }
     }
 

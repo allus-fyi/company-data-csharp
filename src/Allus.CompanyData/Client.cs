@@ -26,9 +26,11 @@
 //     a lazy binary handle) rather than a list of type names. A type the held registry does not
 //     carry triggers one bounded refetch.
 //   * Binary — a value's BinaryHandle.BytesAsync() GETs the slot file endpoint and returns the file
-//     bytes. That endpoint has two 200 shapes — an {"encrypted":true,"value":<wrapper>} JSON
-//     envelope the same service-key decrypt unwraps, or the raw file bytes under the file's own
-//     Content-Type — and BinaryFetchImpl classifies which arrived so the caller never has to.
+//     bytes. That endpoint has three 200 shapes — an {"encrypted":true,"value":<wrapper>} JSON body
+//     the same service-key decrypt unwraps, an {"encrypted":false,"value":"<envelope>"} JSON body
+//     carrying that envelope in the clear, or the raw file bytes under the file's own Content-Type —
+//     and BinaryFetchImpl classifies which arrived so the caller never has to. PagesAsync() and
+//     MetadataAsync() expose the rest of an envelope.
 //   * Changes feed — ProcessChangesAsync delegates to the Pump, injecting a fetch closure
 //     (GET /changes?limit=) and a decrypt closure that builds a typed Change.
 
@@ -154,12 +156,15 @@ public sealed class Client : IDisposable
 
     /// <summary>
     /// Fetch a company-facing binary file endpoint and classify its response.
-    /// <para>The endpoint has TWO 200 shapes and which one arrives is not the company's to
+    /// <para>The endpoint has THREE 200 shapes and which one arrives is not the company's to
     /// predict: a person whose source field is PRIVATE yields <c>application/json</c>
-    /// <c>{"encrypted":true,"value":&lt;wrapper&gt;}</c>, a person whose field is not yields the file's
-    /// own Content-Type and the bytes themselves. The decision is made on <c>Content-Type</c> and never
-    /// by sniffing the body — a PDF or an image that happened to start with a brace would be
-    /// indistinguishable from a wrapper.</para>
+    /// <c>{"encrypted":true,"value":&lt;wrapper&gt;}</c>; a NON-PRIVATE source whose type stores more
+    /// than one file or declares metadata entries yields
+    /// <c>{"encrypted":false,"value":"&lt;envelope&gt;"}</c>; every other non-private source yields the
+    /// file's own Content-Type and the bytes themselves. The bytes shape is told apart on
+    /// <c>Content-Type</c> and never by sniffing the body — a PDF or an image that happened to start
+    /// with a brace would be indistinguishable from a wrapper — and inside a structured body it is
+    /// <c>encrypted</c> that decides.</para>
     /// <para>A 410 <c>company_data.file_expired</c> (the answer's 90-day retention has elapsed)
     /// surfaces as an <see cref="ApiException"/> whose <see cref="ApiException.Details"/> carry
     /// <c>content_sha256</c> and <c>expired_at</c>.</para>
@@ -185,9 +190,23 @@ public sealed class Client : IDisposable
                 ContentType: contentType,
                 ContentSha256: digest);
 
-        // Parsed through the transport's own JSON/XML choice, so an xml-format client keeps working
-        // exactly as it did when this went through GetAsync.
-        var body = _http.ParseResponse(resp);
+        // Parsed by what the RESPONSE says it is, never by the configured Format: these four routes
+        // answer application/json on both structured arms whatever the client speaks.
+        var body = _http.ParseResponseByContentType(resp);
+        // `encrypted: false` with a string `value` is the PLAINTEXT ENVELOPE arm; every other
+        // structured body is the wrapper arm, which is what the bare-wrapper routes (a company's own
+        // contract copy, its run slot file) answer with.
+        if (body.Kind == NodeKind.Object
+            && body.Get("encrypted").RawScalar is bool encryptedFlag
+            && !encryptedFlag
+            && body.Get("value").RawScalar is string envelopeJson)
+        {
+            return new BinaryFetchResult(
+                Encrypted: false,
+                ContentType: contentType.Length == 0 ? null : contentType,
+                ContentSha256: digest,
+                Envelope: envelopeJson);
+        }
         var wrapper = body.Kind == NodeKind.Object && body.Has("value")
             ? body.Get("value")
             : body; // defensive: some shapes might return the wrapper directly
