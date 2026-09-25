@@ -1272,7 +1272,7 @@ public sealed class Client : IDisposable
             answersOut.Add(new Dictionary<string, object?> { ["slug"] = slug, ["values"] = values });
         }
 
-        var (leaf, nextNode) = ComputeNextNode(run.Definition, run.CurrentNode, full);
+        var (leaf, nextNode) = ComputeNextNode(run.Definition, run.CurrentNode, full, run.ReferenceDate);
         var body = new Dictionary<string, object?> { ["answers"] = answersOut };
         if (leaf)
         {
@@ -1340,7 +1340,7 @@ public sealed class Client : IDisposable
         var fill = fillNode(node, answers) ?? new Dictionary<string, object?>();
         var merged = new Dictionary<string, object?>(answers);
         foreach (var (k, v) in fill) merged[k] = v;
-        var (wasLeaf, _) = ComputeNextNode(run.Definition, run.CurrentNode, merged);
+        var (wasLeaf, _) = ComputeNextNode(run.Definition, run.CurrentNode, merged, run.ReferenceDate);
         run = await SubmitFlowAnswersAsync(run, fill, partyPubKeys, ct).ConfigureAwait(false);
         var mode = run.OutputMode ?? run.Definition.Get("output_mode").AsString();
         if (wasLeaf && mode == "document")
@@ -1403,19 +1403,22 @@ public sealed class Client : IDisposable
     }
 
     /// <summary>
-    /// The next node after <paramref name="fromKey"/> — ordered outgoing edges, first match wins.
-    /// Leaf is true when there is no outgoing edge or none matched (a dead-end is a leaf).
+    /// The next node after <paramref name="fromKey"/>: ordered outgoing edges, first match wins.
+    /// Conditions use the answers plus computed constants at the run reference date.
+    /// No matching outgoing edge means a leaf.
     /// </summary>
     private static (bool Leaf, string? Next) ComputeNextNode(
-        Node definition, string? fromKey, IReadOnlyDictionary<string, object?> answers)
+        Node definition, string? fromKey, IReadOnlyDictionary<string, object?> answers, string? referenceDate)
     {
         var edges = (definition.Get("edges").Kind == NodeKind.List ? definition.Get("edges").AsList() : new List<Node>())
             .Where(e => e.Kind == NodeKind.Object && e.Get("from").AsString() == fromKey)
             .OrderBy(e => EdgeSort(e))
             .ToList();
         if (edges.Count == 0) return (true, null);
+        var constants = definition.Get("constants").Kind == NodeKind.List ? definition.Get("constants").AsList() : new List<Node>();
+        var materialized = FlowCondition.ComputeConstants(constants, answers, referenceDate);
         foreach (var e in edges)
-            if (FlowCondition.Evaluate(e.Get("condition"), answers))
+            if (FlowCondition.Evaluate(e.Get("condition"), materialized))
                 return (false, e.Get("to").AsString());
         return (true, null);
     }
