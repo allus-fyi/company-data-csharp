@@ -18,6 +18,7 @@
 //   - and over [] → true; or over [] → false.
 
 using System.Globalization;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace Allus.CompanyData;
@@ -228,11 +229,16 @@ public static class FlowCondition
 
     /// <summary>
     /// Only the constant key→value entries (the original answers excluded) — an author-preview
-    /// convenience over <see cref="ComputeConstants"/>.
+    /// convenience over <see cref="ComputeConstants"/>. <paramref name="pluginSlugs"/>, when given,
+    /// names the definition's plugin element slugs: their stored answers are expanded
+    /// (<see cref="ExpandPluginAnswers"/>) before the constants are computed, so a constant can read
+    /// a plugin output such as <c>cao.min_wage</c>.
     /// </summary>
     public static IReadOnlyDictionary<string, object?> ResolvedConstants(
-        IEnumerable<Node> constants, IReadOnlyDictionary<string, object?> answers, string? referenceDate)
+        IEnumerable<Node> constants, IReadOnlyDictionary<string, object?> answers, string? referenceDate,
+        IEnumerable<string>? pluginSlugs = null)
     {
+        if (pluginSlugs is not null) answers = ExpandPluginAnswers(answers, pluginSlugs);
         var list = constants?.ToList() ?? new List<Node>();
         var full = ComputeConstants(list, answers, referenceDate);
         var result = new Dictionary<string, object?>();
@@ -302,6 +308,21 @@ public static class FlowCondition
             case "math":
             {
                 var args = expr.Get("args").AsList();
+                var op = expr.Get("op").AsString();
+                // max/min are variadic and skip the arguments that are not finite numbers, so they
+                // run before the any-null guard below; no numeric argument at all → null.
+                if (op is "max" or "min")
+                {
+                    double? best = null;
+                    foreach (var a in args)
+                    {
+                        var n = ToNum(EvalExpr(a, map, referenceDate));
+                        if (!n.HasValue || !double.IsFinite(n.Value)) continue;
+                        if (best is null || (op == "max" && n.Value > best.Value) || (op == "min" && n.Value < best.Value))
+                            best = n.Value;
+                    }
+                    return best;
+                }
                 var nums = new List<double>(args.Count);
                 foreach (var a in args)
                 {
@@ -311,7 +332,7 @@ public static class FlowCondition
                     if (!n.HasValue || !double.IsFinite(n.Value)) return null;
                     nums.Add(n.Value);
                 }
-                switch (expr.Get("op").AsString())
+                switch (op)
                 {
                     case "add": return FinNum(nums.Aggregate(0.0, (x, y) => x + y));   // variadic, identity 0
                     case "mul": return FinNum(nums.Aggregate(1.0, (x, y) => x * y));   // variadic, identity 1
@@ -393,7 +414,8 @@ public static class FlowCondition
     }
 
     // Collect the constant KEYS an expression directly references (topological ordering only).
-    private static void CollectExprConstRefs(Node expr, HashSet<string> constKeys, OrderedKeySet acc)
+    // A null constKeys collects every ref, not only the constant ones.
+    private static void CollectExprConstRefs(Node expr, HashSet<string>? constKeys, OrderedKeySet acc)
     {
         if (expr.Kind != NodeKind.Object) return;
         switch (expr.Get("type").AsString())
@@ -401,7 +423,7 @@ public static class FlowCondition
             case "ref":
             {
                 var k = expr.Get("key").AsString();
-                if (k is not null && constKeys.Contains(k)) acc.Add(k);
+                if (k is not null && (constKeys is null || constKeys.Contains(k))) acc.Add(k);
                 return;
             }
             case "lit":
@@ -428,7 +450,7 @@ public static class FlowCondition
         }
     }
 
-    private static void CollectCondConstRefs(Node cond, HashSet<string> constKeys, OrderedKeySet acc)
+    private static void CollectCondConstRefs(Node cond, HashSet<string>? constKeys, OrderedKeySet acc)
     {
         if (cond.Kind != NodeKind.Object) return;
         var op = cond.Get("op").AsString();
@@ -438,6 +460,130 @@ public static class FlowCondition
             return;
         }
         var field = cond.Get("field").AsString();
-        if (field is not null && constKeys.Contains(field)) acc.Add(field);
+        if (field is not null && (constKeys is null || constKeys.Contains(field))) acc.Add(field);
+    }
+
+    /// <summary>Every key an expression reads — refs and <c>if</c> conditions' fields — in first-seen order.</summary>
+    internal static List<string> ExprRefs(Node expr)
+    {
+        var acc = new OrderedKeySet();
+        CollectExprConstRefs(expr, null, acc);
+        return acc.Keys;
+    }
+
+    /// <summary>The evaluator's number coercion (numeric strings count; booleans and null do not).</summary>
+    internal static double? NumberOf(object? v) => ToNum(v);
+
+    /// <summary>The evaluator's stringification (null → "").</summary>
+    internal static string StringOf(object? v) => Str(v);
+
+    /// <summary>A strict YYYY-MM-DD calendar date at UTC midnight, or null.</summary>
+    internal static DateTime? DateOf(object? v) => ParseFlowDate(v)?.utc;
+
+    // ── plugin answers ──────────────────────────────────────────────────────────────────────
+
+    // The key shape a plugin block or output must have to be readable as "<slug>.<key>"; the key
+    // "id" is reserved for a pick's id.
+    private static readonly Regex PluginKeyPattern = new(@"^[a-z][a-z0-9_]{0,39}$", RegexOptions.CultureInvariant);
+
+    private static bool PluginKeyUsable(string? key) => key is not null && key != "id" && PluginKeyPattern.IsMatch(key);
+
+    // Parse a stored plugin answer: null when it is not a JSON object; finished = it carries an
+    // "outputs" array (an answer without one is unfinished).
+    private static Node? ParsePluginPlaintext(string plaintext, out bool finished)
+    {
+        finished = false;
+        Node node;
+        try { node = Node.FromJsonString(plaintext); }
+        catch (JsonException) { return null; }
+        if (node.Kind != NodeKind.Object) return null;
+        finished = node.Get("outputs").Kind == NodeKind.List;
+        return node;
+    }
+
+    // The value of every block, in stored order, joined by " / ".
+    private static string PluginSummaryOf(Node obj) =>
+        string.Join(" / ", obj.Get("blocks").AsList().Select(b => Str(b.Get("value").ToObjectGraph())));
+
+    /// <summary>
+    /// A NEW answer map in which every finished plugin answer named by <paramref name="pluginSlugs"/> is
+    /// replaced by its summary (the block values joined by " / ") and joined by <c>slug.block</c> (the
+    /// block's value), <c>slug.block.id</c> (a search_select pick's id) and <c>slug.output</c> (the
+    /// output's typed value; a null output adds no key). A plugin answer that parses but carries no
+    /// "outputs" array is unfinished and its entry is removed; a value that is not a JSON object is left
+    /// as it is. The input map is not changed and a slug outside pluginSlugs is never touched.
+    /// </summary>
+    public static IReadOnlyDictionary<string, object?> ExpandPluginAnswers(
+        IReadOnlyDictionary<string, object?> answers, IEnumerable<string> pluginSlugs)
+    {
+        var outMap = new Dictionary<string, object?>(answers);
+        foreach (var slug in pluginSlugs)
+        {
+            if (!answers.TryGetValue(slug, out var raw) || raw is not string text) continue;
+            var obj = ParsePluginPlaintext(text, out var finished);
+            if (obj is null) continue;
+            if (!finished)
+            {
+                outMap.Remove(slug);
+                continue;
+            }
+            outMap[slug] = PluginSummaryOf(obj);
+            foreach (var b in obj.Get("blocks").AsList())
+            {
+                if (b.Kind != NodeKind.Object) continue;
+                var key = b.Get("key").AsString();
+                if (!PluginKeyUsable(key)) continue;
+                var value = b.Get("value").ToObjectGraph();
+                if (value is not null) outMap[slug + "." + key] = value;
+                if (b.Get("kind").AsString() == "search_select" && b.Has("id") && !b.Get("id").IsNull)
+                    outMap[slug + "." + key + ".id"] = Str(b.Get("id").ToObjectGraph());
+            }
+            foreach (var o in obj.Get("outputs").AsList())
+            {
+                if (o.Kind != NodeKind.Object) continue;
+                var key = o.Get("key").AsString();
+                if (!PluginKeyUsable(key)) continue;
+                var value = o.Get("value").ToObjectGraph();
+                if (value is not null) outMap[slug + "." + key] = value;
+            }
+        }
+        return outMap;
+    }
+
+    /// <summary>
+    /// A stored plugin answer's summary — its block values joined by " / " — or null when the plaintext
+    /// is not a finished plugin answer (a JSON object with an "outputs" array).
+    /// </summary>
+    public static string? PluginAnswerSummary(string plaintext)
+    {
+        var obj = ParsePluginPlaintext(plaintext, out var finished);
+        return obj is not null && finished ? PluginSummaryOf(obj) : null;
+    }
+
+    /// <summary>
+    /// The display form of a stored plugin answer — the blocks, then the outputs, in stored order — or
+    /// null when the plaintext is not a JSON object with an "outputs" array. Reading it needs neither
+    /// the plugin nor its description: labels and order are part of the answer.
+    /// </summary>
+    public static PluginView? PluginAnswerView(string plaintext)
+    {
+        var obj = ParsePluginPlaintext(plaintext, out var finished);
+        if (obj is null || !finished) return null;
+        var blocks = obj.Get("blocks").AsList()
+            .Select(b => new PluginViewBlock(Str(b.Get("label").ToObjectGraph()), b.Get("value").ToObjectGraph()))
+            .ToList();
+        var outputs = obj.Get("outputs").AsList()
+            .Select(o => new PluginViewOutput(Str(o.Get("label").ToObjectGraph()), Str(o.Get("type").ToObjectGraph()), o.Get("value").ToObjectGraph()))
+            .ToList();
+        return new PluginView(blocks, outputs);
     }
 }
+
+/// <summary>One block of a stored plugin answer as shown to a reader: its label and its value (the option label for a search_select pick).</summary>
+public sealed record PluginViewBlock(string Label, object? Value);
+
+/// <summary>One output of a stored plugin answer as shown to a reader.</summary>
+public sealed record PluginViewOutput(string Label, string Type, object? Value);
+
+/// <summary>What every surface renders for a stored plugin answer: the blocks, then the outputs, in stored order.</summary>
+public sealed record PluginView(IReadOnlyList<PluginViewBlock> Blocks, IReadOnlyList<PluginViewOutput> Outputs);

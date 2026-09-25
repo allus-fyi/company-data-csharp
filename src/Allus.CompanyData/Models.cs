@@ -161,6 +161,13 @@ public sealed record RequestField(
     /// </summary>
     public int? VerifiedMaxAgeDays { get; init; }
 
+    /// <summary>
+    /// The plugin member of a plugin row (<see cref="Type"/> <c>plugin</c>): the plugin's name, its
+    /// field type and the snapshot of that field type's blocks, inputs and outputs. Null on every
+    /// other row, and on an older API.
+    /// </summary>
+    public RequestFieldPlugin? Plugin { get; init; }
+
     public static RequestField FromApi(Node obj) => new(
         Slug: obj.Get("slug").AsString(),
         Label: obj.Get("label").AsString(),
@@ -173,6 +180,7 @@ public sealed record RequestField(
         Audience = obj.Get("audience").AsString(),
         Verified = ModelCoerce.CoerceBool(obj.Get("verified")) ?? false,
         VerifiedMaxAgeDays = ModelCoerce.CoerceInt(obj.Get("verified_max_age_days")),
+        Plugin = RequestFieldPlugin.FromApi(obj.Get("plugin")),
     };
 
     public static List<RequestField> ListFromApi(Node body)
@@ -181,6 +189,23 @@ public sealed record RequestField(
             ? body.Get("request_fields").AsList()
             : body.Kind == NodeKind.List ? body.AsList() : new List<Node>();
         return items.Select(FromApi).ToList();
+    }
+}
+
+/// <summary>The plugin member of a plugin request row or flow row.</summary>
+/// <param name="PluginName">The plugin's name.</param>
+/// <param name="FieldType">The plugin field type the row answers.</param>
+/// <param name="Snapshot">The field type's description as the company saved it: plugin_name, host,
+/// label, blocks, inputs, outputs (a plain object graph).</param>
+public sealed record RequestFieldPlugin(string? PluginName, string? FieldType, IReadOnlyDictionary<string, object?>? Snapshot)
+{
+    internal static RequestFieldPlugin? FromApi(Node node)
+    {
+        if (node.Kind != NodeKind.Object) return null;
+        return new RequestFieldPlugin(
+            node.Get("plugin_name").AsString(),
+            node.Get("field_type").AsString(),
+            node.Get("snapshot").ToObjectGraph() as IReadOnlyDictionary<string, object?>);
     }
 }
 
@@ -273,6 +298,15 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
         BinaryFetch? binaryFetch)
     {
         var ftype = (fieldType ?? "").ToLowerInvariant();
+
+        // The type key "plugin" is reserved and never a registry row: a plugin answer is the
+        // self-describing JSON of its blocks and outputs, typed before the registry is asked.
+        if (ftype == PluginValue.TypeKey)
+        {
+            if (!obj.Has("value") || obj.Get("value").IsNull) return null;
+            return PluginValue.Parse(decryptValue(obj.Get("value")));
+        }
+
         // The registry is read HERE and not before: fieldType was resolved by a call that may have
         // healed the registry, and this value — the one that triggered the heal — must be typed by
         // the rows the heal brought in.
@@ -716,6 +750,13 @@ public sealed record FlowRun(
     /// </summary>
     public IReadOnlyList<FlowRunParticipant> Participants { get; init; } = Array.Empty<FlowRunParticipant>();
 
+    /// <summary>
+    /// The slugs whose answer came from a private source. Every party of the run sees it; it is
+    /// metadata, never a value. Null when the run read did not carry the list, which the plugin
+    /// helpers read as "unknown": every other party's value is then treated as private.
+    /// </summary>
+    public IReadOnlyList<string>? PrivateSlugs { get; init; }
+
     /// <summary>The party key the company is bound to (Bindings[key] == CompanyUserId).</summary>
     public string? CompanyPartyKey
     {
@@ -780,6 +821,9 @@ public sealed record FlowRun(
             Participants = obj.Get("participants").Kind == NodeKind.List
                 ? obj.Get("participants").AsList().Where(p => p.Kind == NodeKind.Object).Select(FlowRunParticipant.FromApi).ToList()
                 : Array.Empty<FlowRunParticipant>(),
+            PrivateSlugs = obj.Get("private_slugs").Kind == NodeKind.List
+                ? obj.Get("private_slugs").AsList().Select(n => n.AsString()).Where(v => !string.IsNullOrEmpty(v)).Select(v => v!).ToList()
+                : null,
         };
     }
 }

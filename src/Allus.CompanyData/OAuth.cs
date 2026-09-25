@@ -113,6 +113,13 @@ public sealed class SignInResult
 /// <summary>The RP-side "Sign in with allme" client.</summary>
 public sealed class OAuthClient
 {
+    /// <summary>
+    /// Parse a plugin claim's value — the self-describing JSON string a plugin claim delivers in
+    /// <see cref="SignInResult.Values"/> — into a <see cref="PluginValue"/>. A value that is not a JSON
+    /// object with an <c>outputs</c> array throws <see cref="ValidationException"/> (field type <c>plugin</c>).
+    /// </summary>
+    public static PluginValue ParsePluginValue(string value) => PluginValue.Parse(value);
+
     /// <summary>The hosted consent surface. Native apps claim this https link; web is the fallback.</summary>
     public const string DefaultAuthorizeUrl = "https://web.allme.fyi/auth";
 

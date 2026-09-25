@@ -119,6 +119,10 @@ public sealed class Client : IDisposable
     // The service RSA public key (public half of the loaded private key), derived once.
     private RSA? _servicePublicKey;
 
+    // The plain transport plugin calls reach the forwarder over — never the API transport, which
+    // attaches the bearer token and rewrites the base URL.
+    private readonly HttpClient _pluginHttp = PluginFlowParty.NewTransport();
+
     public Client(
         Config config,
         ApiHttp? http = null,
@@ -333,7 +337,7 @@ public sealed class Client : IDisposable
     {
         var registry = await FieldTypesAsync(ct).ConfigureAwait(false);
         var missing = types
-            .Where(t => !string.IsNullOrEmpty(t) && !registry.Knows(t) && !_unresolvedTypes.Contains(t!))
+            .Where(t => !string.IsNullOrEmpty(t) && t != PluginValue.TypeKey && !registry.Knows(t) && !_unresolvedTypes.Contains(t!))
             .Select(t => t!)
             .ToList();
         if (missing.Count == 0) return;
@@ -1253,6 +1257,13 @@ public sealed class Client : IDisposable
             }
         }
 
+        // A field's min and max are expressions over the live answer map (plugin outputs included);
+        // a value outside them is refused before anything is encrypted.
+        var live = PluginFlowParty.LiveAnswers(run, answersSoFar, fill);
+        foreach (var (slug, val) in fill)
+            PluginFlowParty.CheckBounds(run, slug, val, live);
+
+        var sourcePrivate = PluginFlowParty.SourcePrivate(run, fill.Keys, run.ServiceUserId);
         var answersOut = new List<object?>();
         foreach (var (slug, val) in fill)
         {
@@ -1269,7 +1280,10 @@ public sealed class Client : IDisposable
                     ["value"] = Crypto.EncryptForPublicKey(plain, key).ToObjectGraph(),
                 });
             }
-            answersOut.Add(new Dictionary<string, object?> { ["slug"] = slug, ["values"] = values });
+            var answer = new Dictionary<string, object?> { ["slug"] = slug, ["values"] = values };
+            // The value came from a private source: a default reaching one.
+            if (sourcePrivate.Contains(slug)) answer["source_private"] = true;
+            answersOut.Add(answer);
         }
 
         var (leaf, nextNode) = ComputeNextNode(run.Definition, run.CurrentNode, full, run.ReferenceDate);
@@ -1286,6 +1300,64 @@ public sealed class Client : IDisposable
         var res = await _http.PostAsync($"{FlowRunsPath}/{run.Id}/answers", jsonBody: body, ct: ct).ConfigureAwait(false);
         return FlowRun.FromApi(res);
     }
+
+    // ── plugins on the company's flow steps ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// A pass to the plugins of the plugin elements on the run's current step
+    /// (<c>POST /api/company-data/flow-runs/{runId}/plugin-pass</c>). The run must be awaiting the company.
+    /// </summary>
+    public async Task<PluginPass> PluginPassAsync(string runId, CancellationToken ct = default)
+        => PluginPass.FromApi(await _http.PostAsync($"{FlowRunsPath}/{runId}/plugin-pass", jsonBody: null, ct: ct).ConfigureAwait(false));
+
+    private PluginFlowParty PluginParty(string runId) => new(
+        _pluginHttp,
+        ct => FlowRunAsync(runId, ct),
+        ct => PluginPassAsync(runId, ct),
+        DecryptRunAnswers,
+        run => run.ServiceUserId);
+
+    /// <summary>
+    /// Ask the plugin behind the plugin element <paramref name="slug"/> for the options of one
+    /// search_select <paramref name="block"/>. <paramref name="query"/> filters them ("" lists
+    /// everything); <paramref name="picks"/> holds the ids picked so far by block key and
+    /// <paramref name="values"/> the typed block values.
+    /// <para><paramref name="draft"/> holds the current step's answers not yet submitted (slug →
+    /// plaintext). The plugin's inputs are read from ONE live answer map — the run's stored answers,
+    /// overlaid with draft for the current step's slugs, plugin answers expanded, constants computed —
+    /// and converted to their declared types. An input that is another party's private value (a slug in
+    /// <see cref="FlowRun.PrivateSlugs"/>, a constant reaching one, or a draft whose field's default
+    /// reaches one) is never sent: a required one throws <see cref="PluginInputUnavailableException"/>.</para>
+    /// <para>The request is sealed to the plugin's public key and posted to the forwarder over a plain
+    /// transport that carries no allme credential; the reply is sealed to a key pair made for the call
+    /// and opened here.</para>
+    /// </summary>
+    public Task<PluginOptionsResult> PluginOptionsAsync(
+        string runId, string slug, string block, string query,
+        IReadOnlyDictionary<string, string>? picks = null, IReadOnlyDictionary<string, object?>? values = null,
+        IReadOnlyDictionary<string, object?>? draft = null, CancellationToken ct = default)
+        => PluginParty(runId).OptionsAsync(slug, block, query, picks, values, draft, ct);
+
+    /// <summary>
+    /// Ask the plugin behind the plugin element <paramref name="slug"/> for the outputs of the picks and
+    /// typed values so far, reading inputs as <see cref="PluginOptionsAsync"/> does. Answers
+    /// <see cref="PluginOutputs"/>, or <see cref="PluginPicksInvalid"/> when the picks no longer fit;
+    /// after changing an input, call it again before submitting.
+    /// </summary>
+    public Task<PluginOutputsResult> PluginOutputsAsync(
+        string runId, string slug,
+        IReadOnlyDictionary<string, string>? picks = null, IReadOnlyDictionary<string, object?>? values = null,
+        IReadOnlyDictionary<string, object?>? draft = null, CancellationToken ct = default)
+        => PluginParty(runId).OutputsAsync(slug, picks, values, draft, ct);
+
+    /// <summary>
+    /// Apply <paramref name="slug"/>'s min and max to <paramref name="value"/> over the live answer map
+    /// (the stored answers overlaid with <paramref name="draft"/>, plugin answers expanded, constants
+    /// computed); throws <see cref="ValidationException"/> naming the broken bound.
+    /// <see cref="SubmitFlowAnswersAsync"/> applies the same check to every value it submits.
+    /// </summary>
+    public void CheckFlowValue(FlowRun run, string slug, object? value, IReadOnlyDictionary<string, object?>? draft = null)
+        => PluginFlowParty.CheckBounds(run, slug, value, PluginFlowParty.LiveAnswers(run, DecryptRunAnswers(run), draft));
 
     /// <summary>
     /// Document-mode company leaf: one-time-key value gather → POST /generate. Builds a random 32-byte
@@ -1404,8 +1476,8 @@ public sealed class Client : IDisposable
 
     /// <summary>
     /// The next node after <paramref name="fromKey"/>: ordered outgoing edges, first match wins.
-    /// Conditions use the answers plus computed constants at the run reference date.
-    /// No matching outgoing edge means a leaf.
+    /// Conditions use the answers — plugin answers expanded — plus computed constants at the run
+    /// reference date. No matching outgoing edge means a leaf.
     /// </summary>
     private static (bool Leaf, string? Next) ComputeNextNode(
         Node definition, string? fromKey, IReadOnlyDictionary<string, object?> answers, string? referenceDate)
@@ -1416,7 +1488,8 @@ public sealed class Client : IDisposable
             .ToList();
         if (edges.Count == 0) return (true, null);
         var constants = definition.Get("constants").Kind == NodeKind.List ? definition.Get("constants").AsList() : new List<Node>();
-        var materialized = FlowCondition.ComputeConstants(constants, answers, referenceDate);
+        var materialized = FlowCondition.ComputeConstants(
+            constants, FlowCondition.ExpandPluginAnswers(answers, PluginFlowParty.PluginSlugsOf(definition)), referenceDate);
         foreach (var e in edges)
             if (FlowCondition.Evaluate(e.Get("condition"), materialized))
                 return (false, e.Get("to").AsString());
@@ -1438,7 +1511,7 @@ public sealed class Client : IDisposable
     }
 
     /// <summary>The party that owns <paramref name="nodeKey"/> in the definition.</summary>
-    private static string? PartyOf(Node definition, string? nodeKey)
+    internal static string? PartyOf(Node definition, string? nodeKey)
     {
         var node = NodeByKey(definition, nodeKey);
         return node?.Get("party").AsString();
@@ -1450,7 +1523,7 @@ public sealed class Client : IDisposable
     /// slug is not a field element (or elements are absent) — callers then SKIP validation rather
     /// than invent a type.
     /// </summary>
-    private static Node? FieldElementForSlug(Node definition, string slug)
+    internal static Node? FieldElementForSlug(Node definition, string slug)
     {
         if (definition.Get("nodes").Kind != NodeKind.List) return null;
         foreach (var n in definition.Get("nodes").AsList())
@@ -1466,7 +1539,7 @@ public sealed class Client : IDisposable
     }
 
     /// <summary>A field element's declared type, null when it names none.</summary>
-    private static string? FieldTypeOfElement(Node element)
+    internal static string? FieldTypeOfElement(Node element)
     {
         var ft = element.Get("field_type").AsString();
         return string.IsNullOrEmpty(ft) ? element.Get("type").AsString() : ft;
@@ -1549,6 +1622,7 @@ public sealed class Client : IDisposable
         _privateKey.Dispose();
         _accountKey?.Dispose();
         _servicePublicKey?.Dispose();
+        _pluginHttp.Dispose();
         lock (_pubkeyLock) { foreach (var key in _pubkeyCache.Values) key.Dispose(); }
     }
 }

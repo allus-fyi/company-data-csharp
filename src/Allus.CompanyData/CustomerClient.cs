@@ -143,6 +143,9 @@ public sealed class CustomerClient
     private Exception? _fieldTypesFailure;
     private readonly HashSet<string> _unresolvedTypes = new(StringComparer.Ordinal);
     private Pump? _pump;
+    // The plain transport plugin calls reach the forwarder over — never the API transport, which
+    // attaches the bearer token and rewrites the base URL.
+    private readonly HttpClient _pluginHttp = PluginFlowParty.NewTransport();
 
     public CustomerClient(
         Config config,
@@ -266,9 +269,30 @@ public sealed class CustomerClient
     public async Task<FlowRun> FlowRunAsync(string connectionId, string runId, System.Threading.CancellationToken ct = default)
         => FlowRun.FromApi(await _http.GetAsync($"{Conn}/{connectionId}/flow-runs/{runId}", null, ct).ConfigureAwait(false));
 
+    /// <summary>
+    /// Submit this party's turn (<paramref name="body"/> carries the encrypted per-party answers). It
+    /// reads the run first and sets <c>source_private: true</c> on every answer in <c>body.answers</c>
+    /// that is private: a field whose default reaches a private source.
+    /// </summary>
     public async Task<object?> SubmitFlowAnswersAsync(string connectionId, string runId, object body,
         System.Threading.CancellationToken ct = default)
-        => (await _http.PostAsync($"{Conn}/{connectionId}/flow-runs/{runId}/answers", jsonBody: body, ct: ct).ConfigureAwait(false)).ToObjectGraph();
+    {
+        object? payload = body;
+        if (Node.FromJsonString(JsonSerializer.Serialize(body)).ToObjectGraph() is Dictionary<string, object?> graph
+            && graph.TryGetValue("answers", out var answersObj) && answersObj is List<object?> { Count: > 0 } answers)
+        {
+            var run = await FlowRunAsync(connectionId, runId, ct).ConfigureAwait(false);
+            var submitted = answers.OfType<Dictionary<string, object?>>()
+                .Select(a => a.TryGetValue("slug", out var s) ? s?.ToString() : null)
+                .Where(s => !string.IsNullOrEmpty(s)).Select(s => s!).ToList();
+            var sourcePrivate = PluginFlowParty.SourcePrivate(run, submitted, OwnUserId(run));
+            foreach (var a in answers.OfType<Dictionary<string, object?>>())
+                if (a.TryGetValue("slug", out var s) && s?.ToString() is { } slug && sourcePrivate.Contains(slug))
+                    a["source_private"] = true;
+            payload = graph;
+        }
+        return (await _http.PostAsync($"{Conn}/{connectionId}/flow-runs/{runId}/answers", jsonBody: payload, ct: ct).ConfigureAwait(false)).ToObjectGraph();
+    }
 
     public async Task<object?> DeclineFlowRunAsync(string connectionId, string runId, System.Threading.CancellationToken ct = default)
         => (await _http.PostAsync($"{Conn}/{connectionId}/flow-runs/{runId}/decline", jsonBody: null, ct: ct).ConfigureAwait(false)).ToObjectGraph();
@@ -282,6 +306,77 @@ public sealed class CustomerClient
             : await BatchKeyAsync(party.UserId, ct).ConfigureAwait(false);
         if (pub is null) throw new ConfigException($"no public key available for party {party.UserId}");
         return Crypto.EncryptForPublicKey(plaintext, pub);
+    }
+
+    // ── plugins on this company's flow steps ──────────────────────────────────────────────
+
+    /// <summary>
+    /// A pass to the plugins of the plugin elements on the run's current step
+    /// (<c>POST /api/company-connections/{id}/flow-runs/{runId}/plugin-pass</c>). The run must be awaiting
+    /// this company's party.
+    /// </summary>
+    public async Task<PluginPass> PluginPassAsync(string connectionId, string runId, System.Threading.CancellationToken ct = default)
+        => PluginPass.FromApi(await _http.PostAsync($"{Conn}/{connectionId}/flow-runs/{runId}/plugin-pass", jsonBody: null, ct: ct).ConfigureAwait(false));
+
+    private PluginFlowParty PluginParty(string connectionId, string runId) => new(
+        _pluginHttp,
+        ct => FlowRunAsync(connectionId, runId, ct),
+        ct => PluginPassAsync(connectionId, runId, ct),
+        DecryptOwnRunAnswers,
+        OwnUserId);
+
+    /// <summary>
+    /// Ask the plugin behind the plugin element <paramref name="slug"/> for the options of one
+    /// search_select block — <see cref="Client.PluginOptionsAsync"/> for this company's own party, with
+    /// the inputs read from the run's answers this company opens with its account key, overlaid with
+    /// <paramref name="draft"/> for the current step's slugs.
+    /// </summary>
+    public Task<PluginOptionsResult> PluginOptionsAsync(
+        string connectionId, string runId, string slug, string block, string query,
+        IReadOnlyDictionary<string, string>? picks = null, IReadOnlyDictionary<string, object?>? values = null,
+        IReadOnlyDictionary<string, object?>? draft = null, System.Threading.CancellationToken ct = default)
+        => PluginParty(connectionId, runId).OptionsAsync(slug, block, query, picks, values, draft, ct);
+
+    /// <summary>
+    /// Ask the plugin behind the plugin element <paramref name="slug"/> for the outputs of the picks and
+    /// typed values so far — <see cref="Client.PluginOutputsAsync"/> for this company's own party.
+    /// Answers <see cref="PluginOutputs"/> or <see cref="PluginPicksInvalid"/>.
+    /// </summary>
+    public Task<PluginOutputsResult> PluginOutputsAsync(
+        string connectionId, string runId, string slug,
+        IReadOnlyDictionary<string, string>? picks = null, IReadOnlyDictionary<string, object?>? values = null,
+        IReadOnlyDictionary<string, object?>? draft = null, System.Threading.CancellationToken ct = default)
+        => PluginParty(connectionId, runId).OutputsAsync(slug, picks, values, draft, ct);
+
+    /// <summary>
+    /// Apply <paramref name="slug"/>'s min and max to <paramref name="value"/> over the live answer map
+    /// (this company's own copies of the run's answers, overlaid with <paramref name="draft"/>, plugin
+    /// answers expanded, constants computed); throws <see cref="ValidationException"/> naming the broken
+    /// bound. Call it before <see cref="EncryptFlowAnswerAsync"/> seals the value.
+    /// </summary>
+    public void CheckFlowValue(FlowRun run, string slug, object? value, IReadOnlyDictionary<string, object?>? draft = null)
+        => PluginFlowParty.CheckBounds(run, slug, value, PluginFlowParty.LiveAnswers(run, DecryptOwnRunAnswers(run), draft));
+
+    // The user id bound to the party of the run's current step: the plugin calls and the bound check
+    // act on this company's own turn.
+    private static string? OwnUserId(FlowRun run)
+        => run.Bindings.TryGetValue(Client.PartyOf(run.Definition, run.CurrentNode) ?? "", out var uid) ? uid : null;
+
+    // This company's own copies of the run's answers (for_user_id = the user bound to the current step),
+    // opened with the account key. Each bound party's copy holds the whole run, whoever answered each slug.
+    private Dictionary<string, object?> DecryptOwnRunAnswers(FlowRun run)
+    {
+        var own = OwnUserId(run);
+        var outMap = new Dictionary<string, object?>();
+        if (string.IsNullOrEmpty(own)) return outMap;
+        foreach (var row in run.Answers)
+        {
+            if (row.Get("for_user_id").AsString() != own) continue;
+            var slug = row.Get("slug").AsString();
+            if (string.IsNullOrEmpty(slug) || !row.Has("value") || row.Get("value").IsNull) continue;
+            outMap[slug!] = DecryptAccount(row.Get("value"));
+        }
+        return outMap;
     }
 
     // ── change feed (P2 account feed) ─────────────────────────────────────────────

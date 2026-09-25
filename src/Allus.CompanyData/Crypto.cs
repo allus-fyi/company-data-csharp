@@ -46,14 +46,20 @@ public static class Crypto
     /// Config-only key handling: this is the single place a passphrase is used (driven by
     /// <c>Config.KeyPassphrase</c> / <c>Config.AccountPassphrase</c>), never passed in by
     /// application code.
+    ///
+    /// An UNENCRYPTED PKCS#8 PEM (<c>-----BEGIN PRIVATE KEY-----</c>) loads too, whatever the
+    /// passphrase: a plugin server's own key (<see cref="PluginOpenRequest"/>) is commonly kept that way.
     /// </summary>
-    public static RSA LoadPrivateKey(string encryptedPem, string passphrase)
+    public static RSA LoadPrivateKey(string encryptedPem, string? passphrase)
     {
         var rsa = RSA.Create();
         try
         {
-            // ImportFromEncryptedPem takes the password as chars; PBES2 is read natively.
-            rsa.ImportFromEncryptedPem(encryptedPem.AsSpan(), passphrase.AsSpan());
+            if (encryptedPem.Contains("-----BEGIN PRIVATE KEY-----", StringComparison.Ordinal))
+                rsa.ImportFromPem(encryptedPem.AsSpan());
+            else
+                // ImportFromEncryptedPem takes the password as chars; PBES2 is read natively.
+                rsa.ImportFromEncryptedPem(encryptedPem.AsSpan(), (passphrase ?? "").AsSpan());
         }
         catch (Exception ex) when (ex is CryptographicException or ArgumentException or FormatException)
         {
@@ -292,6 +298,61 @@ public static class Crypto
             default:
                 throw new DecryptException("wrapper must be a JSON object, dictionary, or JSON string");
         }
+    }
+
+    // ── plugin keys and the plugin-server builder routine ─────────────────────────────────────
+
+    /// <summary>
+    /// A fresh RSA-2048 key pair for one plugin call: the private half and the public half as base64
+    /// SPKI — the <c>reply_key</c> a plugin seals its reply to. The private half stays in memory.
+    /// </summary>
+    public static (RSA PrivateKey, string Spki) GenerateReplyKey()
+    {
+        var rsa = RSA.Create(2048);
+        return (rsa, ExportPublicKeySpki(rsa));
+    }
+
+    /// <summary>An RSA public key as base64 SPKI (DER), the form <see cref="LoadPublicKey"/> reads.</summary>
+    public static string ExportPublicKeySpki(RSA key) => Convert.ToBase64String(key.ExportSubjectPublicKeyInfo());
+
+    /// <summary>
+    /// For a plugin's OWN server, never a call on the allme API: open the body of a
+    /// <c>POST {base_url}/call</c> — <c>{"request": "&lt;wrapper&gt;"}</c> — with the plugin's private key
+    /// and return the request object (field_type, op, block, query, picks, values, inputs, reply_key).
+    /// <paramref name="privateKeyPem"/> is a PKCS#8 PEM, encrypted (pass its passphrase) or
+    /// unencrypted (pass null).
+    /// </summary>
+    public static IReadOnlyDictionary<string, object?> PluginOpenRequest(string body, string privateKeyPem, string? passphrase)
+    {
+        Node envelope;
+        try { envelope = Node.FromJsonString(body); }
+        catch (JsonException ex) { throw new DecryptException("plugin call body is not a JSON object", ex); }
+        if (envelope.Kind != NodeKind.Object)
+            throw new DecryptException("plugin call body is not a JSON object");
+        var sealedRequest = envelope.Get("request");
+        if (sealedRequest.IsNull)
+            throw new DecryptException("plugin call body carries no \"request\"");
+        using var key = LoadPrivateKey(privateKeyPem, passphrase);
+        var plaintext = Decrypt(sealedRequest, key);
+        Node request;
+        try { request = Node.FromJsonString(plaintext); }
+        catch (JsonException ex) { throw new DecryptException("plugin request plaintext is not a JSON object", ex); }
+        if (request.ToObjectGraph() is not IReadOnlyDictionary<string, object?> map)
+            throw new DecryptException("plugin request plaintext is not a JSON object");
+        return map;
+    }
+
+    /// <summary>
+    /// For a plugin's OWN server: seal a reply object (<c>{"options":[…],"more":…}</c>,
+    /// <c>{"outputs":{…}}</c> or <c>{"picks_invalid":true}</c>) to the request's reply_key and return the
+    /// response body <c>{"reply": "&lt;wrapper&gt;"}</c>.
+    /// </summary>
+    public static IReadOnlyDictionary<string, object?> PluginSealReply(object reply, string replyKeySpki)
+    {
+        using var pub = LoadPublicKey(replyKeySpki);
+        var plaintext = JsonSerializer.Serialize(reply);
+        var sealedReply = EncryptForPublicKey(plaintext, pub);
+        return new Dictionary<string, object?> { ["reply"] = sealedReply.ToJsonString() };
     }
 
     /// <summary>SHA-256 of raw PDF bytes, lowercase hex — the PlainSha256 a signable file

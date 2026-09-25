@@ -8,6 +8,8 @@
 // | DecryptException               | Wrapper malformed, wrong key, or GCM tag mismatch.|
 // | WebhookException               | Signature verification failed / envelope unwrap.  |
 // | RateLimitException(retryAfter) | A 429 (subclass of ApiException); carries Retry-After.|
+// | ValidationException            | A value fails its type's check, or a flow field's min/max. |
+// | PluginInputUnavailableException| A required plugin input cannot be sent.           |
 //
 // Idiomatic C#: every error is an Exception subclass with the "Exception" suffix.
 
@@ -128,10 +130,73 @@ public class ValidationException : Exception
     /// <summary>The resolved field type that the value failed.</summary>
     public string FieldType { get; }
 
+    /// <summary>"min" or "max" when a flow value lies outside its field's bound; null otherwise.</summary>
+    public string? Bound { get; }
+
+    /// <summary>The bound the value broke (a number or a YYYY-MM-DD date); null when <see cref="Bound"/> is.</summary>
+    public object? BoundValue { get; }
+
     public ValidationException(string slug, string fieldType)
         : base($"validation error: value for \"{slug}\" is not a valid {fieldType}")
     {
         Slug = slug;
         FieldType = fieldType;
+    }
+
+    /// <summary>A flow value outside its field's minimum (<paramref name="bound"/> "min") or maximum ("max").</summary>
+    public ValidationException(string slug, string fieldType, string bound, object? boundValue)
+        : base(bound == "min"
+            ? $"validation error: value for \"{slug}\" is below its minimum {FlowCondition.StringOf(boundValue)}"
+            : $"validation error: value for \"{slug}\" is above its maximum {FlowCondition.StringOf(boundValue)}")
+    {
+        Slug = slug;
+        FieldType = fieldType;
+        Bound = bound;
+        BoundValue = boundValue;
+    }
+}
+
+/// <summary>
+/// A required plugin input cannot be sent. <see cref="Input"/> names the plugin's input key,
+/// <see cref="Source"/> the key it is wired to (null when unwired) and <see cref="Reason"/> says why —
+/// checked in this order: <see cref="Unwired"/>, <see cref="Unanswered"/>,
+/// <see cref="OtherPartyPrivate"/>, <see cref="NotConvertible"/>.
+/// </summary>
+public class PluginInputUnavailableException : Exception
+{
+    /// <summary>The company wired no source to the input.</summary>
+    public const string Unwired = "unwired";
+
+    /// <summary>The input's source has no value yet.</summary>
+    public const string Unanswered = "unanswered";
+
+    /// <summary>The source is another party's private value, which is never sent to a plugin.</summary>
+    public const string OtherPartyPrivate = "other_party_private";
+
+    /// <summary>The source's value does not convert to the input's declared type.</summary>
+    public const string NotConvertible = "not_convertible";
+
+    /// <summary>The plugin's input key.</summary>
+    public string Input { get; }
+
+    /// <summary>The key the input is wired to, or null when it is unwired.</summary>
+    public string? Source { get; }
+
+    /// <summary>Why the input is unavailable.</summary>
+    public string Reason { get; }
+
+    public PluginInputUnavailableException(string input, string? source, string reason)
+        : base($"plugin input \"{input}\" is unavailable: " + reason switch
+        {
+            Unwired => "no source is wired to it",
+            Unanswered => "its source has no value yet",
+            OtherPartyPrivate => "its source is another party's private value",
+            NotConvertible => "its source's value does not convert to the input's type",
+            _ => reason,
+        })
+    {
+        Input = input;
+        Source = source;
+        Reason = reason;
     }
 }

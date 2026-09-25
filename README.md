@@ -383,7 +383,7 @@ See [Webhooks](#webhooks).
 You work with these objects and nothing else (all in `Allus.CompanyData`):
 
 ```text
-RequestField { Slug, Label, Type, OneTime, Mandatory, Verified, VerifiedMaxAgeDays }
+RequestField { Slug, Label, Type, OneTime, Mandatory, Verified, VerifiedMaxAgeDays, Plugin? }
 Connection   { Id, PersonId, DisplayName, ConnectedAt, Values: {<slug>: Value} }
 Value        { ValueObj, Live, UpdatedAt, Verified, VerifiedAt, VerifiedExpiresAt,
                VerifiedMethod, VerifiedProvider, VerificationId }
@@ -425,6 +425,7 @@ PRIMITIVE, so a type added as a row types itself with no SDK release.
 
 | The type's resolved… | .NET `ValueObj` |
 |----------------------|-----------------|
+| the reserved type key `plugin` (checked before the registry) | `PluginValue` — see [Plugins](#plugins) |
 | storage lane `photo` / `document` | a lazy `BinaryHandle` — see below |
 | primitive `composite` | `IDictionary<string, object?>` — the decrypted plaintext is a JSON object, parsed for you |
 | primitive `date` | `DateOnly` (falls back to the raw `string` if it can't be parsed) |
@@ -805,6 +806,11 @@ await client.TriggerFlowRunAsync(flowId, connection.Id!, bindings);
 * `FlowRunDocumentAsync(runId)` downloads the company's own service-key-encrypted copy of a run's generated contract and returns the plaintext file bytes (`404` until the run generates a document) — the honest completion step (fill → complete → `FlowRunAnswers` → `FlowRunDocumentAsync`).
 * `IdentityAsync()` returns this client's `{CompanyUserId, ServiceId}` from `GET /api/company-data/whoami`, so a `TriggerFlowRunAsync` binding's **company** party can bind to `CompanyUserId` (the person party's user id comes from the connection).
 
+### Plugin fields on the company's step
+
+`PluginPassAsync`, `PluginOptionsAsync`, `PluginOutputsAsync` and `CheckFlowValue` call a plugin
+element on the company's own step and check a field's min/max — see [Plugins](#plugins).
+
 ### Reacting to status changes in the pump
 
 When a recipient acts on a document (e.g. signs it), the platform emits a
@@ -840,6 +846,115 @@ The same event arrives over [webhooks](#webhooks) with the identical shape — r
 pump-only**, though: a webhook body's id is not an idempotency key — a live delivery mints it,
 a backlog replay carries the durable row's id — see
 the webhook [delivery contract](#delivery-contract--effectively-unique-rarely-replayed).
+
+---
+
+## Plugins
+
+A company can put a **plugin field** on a flow step, a request row or a sign-in claim. A plugin
+serves the options of the field's blocks (`search_select`, `text`, `number`, `date`) and computes
+its outputs. Its answer is stored like any other answer and reads back without the plugin: it is
+self-describing JSON.
+
+```json
+{"plugin":"Flex","type":"cao",
+ "blocks":[{"key":"cao","kind":"search_select","label":"CAO","id":"hrc","value":"Horeca Fictief"}],
+ "outputs":[{"key":"min_wage","type":"number","label":"Minimum wage","value":9.5}]}
+```
+
+### Reading plugin answers
+
+- **Values.** A value whose row type is the reserved key `plugin` is typed as a `PluginValue`
+  (`Plugin`, `Type`, `Blocks: PluginBlock(Key, Kind, Label, Id, Value)`,
+  `Outputs: PluginOutput(Key, Type, Label, Value)`) before the field-type registry is consulted.
+  A plaintext that is not a JSON object with an `outputs` array (an unfinished answer has none) raises the SDK's validation error with field type `plugin`, both here and from `ParsePluginValue`.
+- **The catalog.** `RequestField.Plugin` is `RequestFieldPlugin(PluginName, FieldType, Snapshot)` on
+  a plugin row (request or flow) and `null` elsewhere; `Snapshot` holds the field type's blocks,
+  inputs and outputs.
+- **Sign-in.** A plugin claim's value in `SignInResult.Values` is the same JSON string;
+  `OAuthClient.ParsePluginValue(s)` (or `PluginValue.Parse(s)`) turns it into a `PluginValue`.
+- **Display.** `FlowCondition.PluginAnswerView(plaintext)` → `PluginView(Blocks: [PluginViewBlock(Label,
+  Value)], Outputs: [PluginViewOutput(Label, Type, Value)])` in stored order (`null` when it is not a
+  finished answer), and `FlowCondition.PluginAnswerSummary(plaintext)` → the block values joined by
+  `" / "` (`null` when not finished).
+
+### Flow expressions over plugin answers
+
+On a flow, a plugin element `cao` is readable in conditions and constants as `cao` (the summary),
+`cao.<block>`, `cao.<block>.id` (a `search_select` pick's id) and `cao.<output>`.
+`FlowCondition.ExpandPluginAnswers(answers, pluginSlugs)` returns a new map with those keys; an
+unfinished answer is removed and a value that is not a JSON object is left as it is.
+`FlowCondition.ResolvedConstants(constants, answers, referenceDate, pluginSlugs)` expands first when
+you pass the definition's plugin element slugs. The `math` ops include `max` and `min` (variadic;
+arguments that are not finite numbers are skipped; none left → `null`). `SubmitFlowAnswersAsync` and
+`ProcessFlowRunAsync` route over the expanded, constants-computed map.
+
+### A plugin field on the company's own step
+
+Methods on `Client` (the service's own party) and on `CustomerClient` (this company's party on
+another company's flow — the same methods with a leading `connectionId`):
+
+| Method | Returns | What it does |
+|--------|---------|--------------|
+| `PluginPassAsync(runId)` | `PluginPass` | A pass for the plugins of the plugin elements on the run's current step: `POST /api/company-data/flow-runs/{runId}/plugin-pass` (`CustomerClient`: `POST /api/company-connections/{id}/flow-runs/{runId}/plugin-pass`). The run must be awaiting your party. |
+| `PluginOptionsAsync(runId, slug, block, query, picks?, values?, draft?)` | `PluginOptionsResult` | The options of one `search_select` block (`Options: PluginOption(Id, Label)`, `More` = the list was cut at 50; `query` `""` lists everything). `picks` = ids picked so far by block key, `values` = typed block values. |
+| `PluginOutputsAsync(runId, slug, picks?, values?, draft?)` | `PluginOutputsResult` | `PluginOutputs(Outputs)` or `PluginPicksInvalid` (the picks no longer fit: pick again). After an input changes, call it again before you submit. |
+| `CheckFlowValue(run, slug, value, draft?)` | `void` | Throws a `ValidationException` naming the bound when `value` is below the field's `min` or above its `max`. `SubmitFlowAnswersAsync` applies the same check to every value it submits. `CustomerClient`: call it before `EncryptFlowAnswerAsync`. |
+
+- **One live answer map.** `draft` is the current step's answers you have not submitted yet (slug →
+  plaintext). The SDK reads the run's stored answers it can open (the service key's copies; the
+  account key's copies on `CustomerClient`), overlays `draft` for the current step's slugs, expands
+  plugin answers and computes the constants. Inputs and bounds are read from that map. An input is
+  converted to its declared type: `number` a JSON number, `date` a `YYYY-MM-DD` string, `boolean` a
+  JSON boolean, `text` a string.
+- **Another party's private value is never sent.** A source is private when its slug is in
+  `FlowRun.PrivateSlugs`, when it is a constant reaching one, or when it is a draft whose field has a
+  default reaching one (whatever the draft's value). A run read without `PrivateSlugs` (`null`)
+  treats every other party's value as private. A required input that cannot be sent throws
+  `PluginInputUnavailableException(Input, Source, Reason)` — `Source` is the key the input is wired
+  to, and `Reason` is, checked in this order, `unwired`, `unanswered`, `other_party_private` or
+  `not_convertible` (constants on the exception); an optional one is left out.
+- **`source_private` on submit.** `SubmitFlowAnswersAsync` (and `CustomerClient.SubmitFlowAnswersAsync`,
+  which reads the run first) sets `source_private: true` on every submitted answer that is private by
+  the same rule: a field whose default reaches a private source. Every party of the run then sees that
+  slug in `PrivateSlugs`. A plugin answer's outputs are never private, whatever inputs produced them,
+  so a plugin answer is never marked.
+- **The call.** The request is sealed to the plugin's public key and posted to the pass's
+  `forwarder_url` + `/call` over a plain `HttpClient` that carries no allme credential, follows no
+  redirect and never rewrites the URL. The reply is sealed to an RSA-2048 key pair made for the call
+  and opened in memory. A `409 plugin.key_changed` reseals once with the key it names; a 401/403
+  takes a new pass once. Any other refusal is an `ApiException` carrying the forwarder's `ErrorKey`
+  (for example `plugin.not_responding`, `plugin.busy`, `plugin.rate_limited`).
+
+```csharp
+var draft = new Dictionary<string, object?> { ["age"] = "19" };
+var options = await client.PluginOptionsAsync(run.Id!, "cao", "cao", "hor", draft: draft);
+var result = await client.PluginOutputsAsync(run.Id!, "cao",
+    new Dictionary<string, string> { ["cao"] = "hrc", ["scale"] = "c", ["step"] = "4" }, draft: draft);
+switch (result)
+{
+    case PluginOutputs o: var minWage = o.Outputs["min_wage"]; break;
+    case PluginPicksInvalid: /* pick again */ break;
+}
+client.CheckFlowValue(run, "wage", "9.00", draft);   // throws ValidationException below the minimum
+```
+
+### Building a plugin server
+
+A plugin's own server uses two standalone functions — never a call on the allme API, so they take
+the plugin's own key:
+
+```csharp
+var req = Crypto.PluginOpenRequest(body, pluginKeyPem, passphrase: null); // null for an unencrypted PKCS#8 PEM
+// req["field_type"], req["op"] ("options" | "outputs"), req["block"], req["query"],
+// req["picks"], req["values"], req["inputs"], req["reply_key"]
+var resp = Crypto.PluginSealReply(new { options = opts, more = false }, (string)req["reply_key"]!);
+// write resp ({"reply": "<wrapper>"}) as the JSON answer
+```
+
+`Crypto.LoadPrivateKey` accepts an unencrypted PKCS#8 PEM as well as an encrypted one.
+`Crypto.GenerateReplyKey()` (an RSA-2048 key pair and its base64 SPKI) and
+`Crypto.ExportPublicKeySpki(key)` are the key helpers the flow methods use.
 
 ---
 
@@ -1069,6 +1184,8 @@ C#'s `*Exception` convention).
 | `DecryptException` | A ciphertext wrapper is malformed, the key is wrong, or the GCM tag mismatches. Surfaces when a value is accessed/decrypted. |
 | `WebhookException` | Signature verification failed, or an envelope couldn't be unwrapped/parsed. |
 | `RateLimitException(RetryAfter)` | A 429 from a rate-limited endpoint. Subclass of `ApiException` (Status fixed at 429); carries `RetryAfter` (seconds, or `null`). |
+| `ValidationException(Slug, FieldType, Bound?, BoundValue?)` | A value fails its field type's check, or (`Bound` = `"min"`/`"max"`) lies outside a flow field's bound. |
+| `PluginInputUnavailableException(Input, Source, Reason)` | A required plugin input cannot be sent — see [Plugins](#plugins). |
 
 ```csharp
 using Allus.CompanyData;

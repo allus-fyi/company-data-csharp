@@ -33,15 +33,22 @@ public sealed class FlowConstantsTests
                 as IReadOnlyDictionary<string, object?> ?? new Dictionary<string, object?>();
             var referenceDate = c.GetProperty("reference_date").GetString()!;
             var expectJson = c.GetProperty("expect").GetRawText();
-            yield return new object[] { name, constants, answers, referenceDate, expectJson };
+            // A case may carry plugin_slugs: those answers are fed through ExpandPluginAnswers
+            // before the constants are computed. Absent → null (no expansion).
+            List<string>? pluginSlugs = c.TryGetProperty("plugin_slugs", out var ps)
+                ? ps.EnumerateArray().Select(e => e.GetString()!).ToList()
+                : null;
+            yield return new object[] { name, constants, answers, referenceDate, expectJson, pluginSlugs! };
         }
     }
 
     [Theory]
     [MemberData(nameof(Cases))]
     public void VectorCase(string name, List<Node> constants,
-                           IReadOnlyDictionary<string, object?> answers, string referenceDate, string expectJson)
+                           IReadOnlyDictionary<string, object?> answers, string referenceDate, string expectJson,
+                           List<string>? pluginSlugs)
     {
+        if (pluginSlugs is not null) answers = FlowCondition.ExpandPluginAnswers(answers, pluginSlugs);
         var result = FlowCondition.ComputeConstants(constants, answers, referenceDate);
         using var expect = JsonDocument.Parse(expectJson);
         foreach (var prop in expect.RootElement.EnumerateObject())
@@ -54,24 +61,27 @@ public sealed class FlowConstantsTests
     [Fact]
     public void VectorHasAllCases()
     {
-        Assert.Equal(51, Cases().Count());
+        Assert.Equal(62, Cases().Count());
     }
 
-    // ResolvedConstants must return EXACTLY the expect map's keys — constants only, no leaked
-    // answer keys — with the same values ComputeConstants produces.
+    // ResolvedConstants must return EXACTLY the declared constant keys — no leaked answer keys —
+    // with the values the expect map pins for them. The expect map may also pin expanded answer
+    // keys, which ResolvedConstants does not return.
     [Theory]
     [MemberData(nameof(Cases))]
     public void ResolvedConstantsVectorCase(string name, List<Node> constants,
-                           IReadOnlyDictionary<string, object?> answers, string referenceDate, string expectJson)
+                           IReadOnlyDictionary<string, object?> answers, string referenceDate, string expectJson,
+                           List<string>? pluginSlugs)
     {
-        var result = FlowCondition.ResolvedConstants(constants, answers, referenceDate);
+        var result = FlowCondition.ResolvedConstants(constants, answers, referenceDate, pluginSlugs);
         using var expect = JsonDocument.Parse(expectJson);
-        var expectKeys = expect.RootElement.EnumerateObject().Select(p => p.Name).ToHashSet();
+        var declared = constants.Select(c => c.Get("key").AsString()).Where(k => k is not null).Select(k => k!).ToHashSet();
         var resultKeys = result.Keys.ToHashSet();
-        Assert.True(expectKeys.SetEquals(resultKeys),
-            $"case {name}: expected keys [{string.Join(",", expectKeys)}], got [{string.Join(",", resultKeys)}]");
+        Assert.True(declared.SetEquals(resultKeys),
+            $"case {name}: expected keys [{string.Join(",", declared)}], got [{string.Join(",", resultKeys)}]");
         foreach (var prop in expect.RootElement.EnumerateObject())
         {
+            if (!declared.Contains(prop.Name)) continue;
             AssertValue(name, prop.Name, result[prop.Name], prop.Value);
         }
     }
