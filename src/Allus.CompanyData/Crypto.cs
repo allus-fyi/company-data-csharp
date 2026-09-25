@@ -231,6 +231,36 @@ public static class Crypto
     }
 
     /// <summary>
+    /// The one-time-key bundle a flow run's <c>/generate</c> takes: the WHOLE answer map, sealed under a
+    /// key used once and never stored. <paramref name="answers"/> is {slug: plaintext} (a non-string
+    /// value is JSON-encoded). A random 32-byte AES-256-GCM key encrypts JSON(answers); the result is
+    /// packed iv(12)||ciphertext||tag(16) and both halves are base64-encoded → {otk, values}. The server
+    /// evaluates every leaf-PDF condition, constant and {{tag}} over this map, so a slug missing from it
+    /// prints blank on the contract.
+    /// </summary>
+    internal static Dictionary<string, object?> OneTimeKeyBundle(IReadOnlyDictionary<string, object?> answers)
+    {
+        var strMap = answers.ToDictionary(
+            kv => kv.Key, kv => kv.Value is string s ? s : JsonSerializer.Serialize(kv.Value));
+        var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(strMap));
+        var otk = RandomNumberGenerator.GetBytes(32);
+        var iv = RandomNumberGenerator.GetBytes(GcmIvLen);
+        var ciphertext = new byte[payload.Length];
+        var tag = new byte[GcmTagLen];
+        using (var aes = new AesGcm(otk, GcmTagLen))
+            aes.Encrypt(iv, payload, ciphertext, tag);
+        var blob = new byte[GcmIvLen + ciphertext.Length + GcmTagLen]; // iv(12) || ciphertext || tag(16)
+        Buffer.BlockCopy(iv, 0, blob, 0, GcmIvLen);
+        Buffer.BlockCopy(ciphertext, 0, blob, GcmIvLen, ciphertext.Length);
+        Buffer.BlockCopy(tag, 0, blob, GcmIvLen + ciphertext.Length, GcmTagLen);
+        return new Dictionary<string, object?>
+        {
+            ["otk"] = Convert.ToBase64String(otk),
+            ["values"] = Convert.ToBase64String(blob),
+        };
+    }
+
+    /// <summary>
     /// Pull the <c>k</c>/<c>iv</c>/<c>d</c> fields out of a wrapper that may be a
     /// <see cref="JsonElement"/>, an <c>IDictionary</c>, or a JSON string. Throws
     /// <see cref="DecryptException"/> on anything malformed or with a missing field.

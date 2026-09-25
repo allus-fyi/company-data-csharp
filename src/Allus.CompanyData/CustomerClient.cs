@@ -3,7 +3,8 @@
 // CustomerClient is what a connecting company uses to consume and answer another
 // company's service over its acct_* credentials: list company↔company connections,
 // provide/edit typed consent answers, read (and decrypt) issued documents, run contract
-// flows, drain the account change feed, and verify account-level webhooks. It reuses the
+// flows — generating the contract of a run whose last step it answered — drain the account
+// change feed, and verify account-level webhooks. It reuses the
 // same crash-safe Pump, webhook helpers, and hybrid-crypto core as the service Client.
 //
 // NO sign/accept methods (spec D6): signing/accepting a contract is a deliberate human
@@ -296,6 +297,26 @@ public sealed class CustomerClient
 
     public async Task<object?> DeclineFlowRunAsync(string connectionId, string runId, System.Threading.CancellationToken ct = default)
         => (await _http.PostAsync($"{Conn}/{connectionId}/flow-runs/{runId}/decline", jsonBody: null, ct: ct).ConfigureAwait(false)).ToObjectGraph();
+
+    /// <summary>
+    /// Generate the contract of a document-mode run whose LEAF this company answered
+    /// (<c>POST /api/company-connections/{id}/flow-runs/{runId}/generate</c>). The party that answers a
+    /// run's last step generates. Submitting the leaf's answers leaves the run "generating"; pass the
+    /// run as re-read then. The whole answer map comes from this company's OWN copy of the answers,
+    /// opened with the account key — every party's answers are sealed to every bound party, so that
+    /// copy holds the whole run and no service key is involved — and is sealed with the one-time-key
+    /// bundle. Returns the API response {document_id, documents, status} (idempotent — a repeat answers
+    /// the same document set). Throws <see cref="ConfigException"/> when the run's current step is not
+    /// bound to this company — the participant the run lists on <paramref name="connectionId"/>.
+    /// </summary>
+    public async Task<object?> GenerateFlowDocumentAsync(string connectionId, FlowRun run, System.Threading.CancellationToken ct = default)
+    {
+        var own = run.Participants.FirstOrDefault(p => p.ConnectionId == connectionId)?.PersonUserId;
+        if (string.IsNullOrEmpty(own) || OwnUserId(run) != own)
+            throw new ConfigException($"run {run.Id} is not at a step this company answered");
+        var body = Crypto.OneTimeKeyBundle(DecryptOwnRunAnswers(run));
+        return (await _http.PostAsync($"{Conn}/{connectionId}/flow-runs/{run.Id}/generate", jsonBody: body, ct: ct).ConfigureAwait(false)).ToObjectGraph();
+    }
 
     /// <summary>Encrypt one answer value for one flow party per the P4 key rule.</summary>
     public async Task<Node> EncryptFlowAnswerAsync(string plaintext, FlowParty party,

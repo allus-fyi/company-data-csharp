@@ -1360,32 +1360,13 @@ public sealed class Client : IDisposable
         => PluginFlowParty.CheckBounds(run, slug, value, PluginFlowParty.LiveAnswers(run, DecryptRunAnswers(run), draft));
 
     /// <summary>
-    /// Document-mode company leaf: one-time-key value gather → POST /generate. Builds a random 32-byte
-    /// AES-256-GCM key, encrypts JSON({slug: plaintext}) of the company's decrypted answers, packs
-    /// iv(12)||ciphertext||tag(16), and POSTs {otk: base64(key), values: base64(blob)}. Returns the
-    /// API response Node {document_id, status: "awaiting_signature"} (idempotent).
+    /// Document-mode company leaf: one-time-key value gather → POST /generate. Seals the company's
+    /// decrypted answers with the one-time-key bundle and POSTs {otk, values}. Returns the API response
+    /// Node {document_id, documents, status} (idempotent — a repeat answers the same document set).
     /// </summary>
     public async Task<Node> GenerateFlowDocumentAsync(FlowRun run, CancellationToken ct = default)
     {
-        var answers = DecryptRunAnswers(run);
-        var strMap = answers.ToDictionary(
-            kv => kv.Key, kv => kv.Value is string s ? s : JsonSerializer.Serialize(kv.Value));
-        var payload = System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(strMap));
-        var otk = RandomNumberGenerator.GetBytes(32);
-        var iv = RandomNumberGenerator.GetBytes(12);
-        var ciphertext = new byte[payload.Length];
-        var tag = new byte[16];
-        using (var aes = new AesGcm(otk, 16))
-            aes.Encrypt(iv, payload, ciphertext, tag);
-        var blob = new byte[12 + ciphertext.Length + 16]; // iv(12) || ciphertext || tag(16)
-        Buffer.BlockCopy(iv, 0, blob, 0, 12);
-        Buffer.BlockCopy(ciphertext, 0, blob, 12, ciphertext.Length);
-        Buffer.BlockCopy(tag, 0, blob, 12 + ciphertext.Length, 16);
-        var body = new Dictionary<string, object?>
-        {
-            ["otk"] = Convert.ToBase64String(otk),
-            ["values"] = Convert.ToBase64String(blob),
-        };
+        var body = Crypto.OneTimeKeyBundle(DecryptRunAnswers(run));
         return await _http.PostAsync($"{FlowRunsPath}/{run.Id}/generate", jsonBody: body, ct: ct).ConfigureAwait(false);
     }
 

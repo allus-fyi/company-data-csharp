@@ -806,6 +806,20 @@ await client.TriggerFlowRunAsync(flowId, connection.Id!, bindings);
 * `FlowRunDocumentAsync(runId)` downloads the company's own service-key-encrypted copy of a run's generated contract and returns the plaintext file bytes (`404` until the run generates a document) — the honest completion step (fill → complete → `FlowRunAnswers` → `FlowRunDocumentAsync`).
 * `IdentityAsync()` returns this client's `{CompanyUserId, ServiceId}` from `GET /api/company-data/whoami`, so a `TriggerFlowRunAsync` binding's **company** party can bind to `CompanyUserId` (the person party's user id comes from the connection).
 
+**The party that answers a run's last step generates the contract — the customer role included.**
+When your company is a CUSTOMER of another company's service and its answer completes a document-mode
+leaf, the run parks at `generating` until you generate:
+
+```csharp
+Task<object?> GenerateFlowDocumentAsync(string connectionId, FlowRun run, CancellationToken ct = default)   // POST /api/company-connections/{connectionId}/flow-runs/{runId}/generate
+```
+
+Pass the run as re-read after your leaf submit. The answer map comes from your OWN copy of the run's
+answers, opened with the account key — every party's answers are sealed to every bound party, so that
+copy holds the whole run and no service key is involved. Returns `{document_id, documents, status}`;
+a repeat answers the same document set. Throws `ConfigException` when the run's current step is not
+bound to your company.
+
 ### Plugin fields on the company's step
 
 `PluginPassAsync`, `PluginOptionsAsync`, `PluginOutputsAsync` and `CheckFlowValue` call a plugin
