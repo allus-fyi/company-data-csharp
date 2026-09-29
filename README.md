@@ -755,18 +755,20 @@ var doc = await client.DocumentAsync(contract.Id!);
 // A BROADCAST (plaintext) document's bytes are returned as-is. A PER-PERSON /
 // private document is encrypted to the RECIPIENT's key (not your service key), so
 // DocumentFileAsync throws ApiException("documents.recipient_encrypted") instead of
-// attempting a doomed service-key decrypt. For a generated flow contract's own
-// copy, use FlowRunDocumentAsync(runId) instead — that copy IS service-key-encrypted.
+// attempting a doomed service-key decrypt. For a generated flow document's own
+// copy, use FlowRunDocumentAsync(runId, outputKey) instead — that copy IS service-key-encrypted.
 byte[] pdf = await client.DocumentFileAsync(contract.Id!);
 
 // Advance its lifecycle status.
 // A contract-flow-generated document can also read "waiting" — a run-participant
-// copy whose signer has not been reached yet in the run's ordered signing plan. It
+// copy whose signer has not been reached yet in the run's signing line. It
 // is read-only: UpdateDocumentStatusAsync throws ApiException("documents.run_managed")
 // (409) on a run-participant document while it is waiting/ready_to_sign/offering —
 // that status moves only through flow generation, the run's own advance,
 // sign/accept, or a run cancel/decline. Such a document's RunSignatures carries the
-// run's ordered signature summary.
+// WHOLE run's signing line — one entry per (output document, participant), in line
+// order, each {output_key, name, party_key, document_id, position, status, action,
+// acted_at}; every document of the run carries the same summary.
 await client.UpdateDocumentStatusAsync(contract.Id!,
     "active");   // offering | ready_to_sign | active | active_but_ending | ended
 
@@ -783,7 +785,7 @@ await client.DeleteDocumentAsync(contract.Id!);
 
 ```csharp
 Dictionary<string, object?> FlowRunAnswers(FlowRun run)                              // #491 gap 1 — a completed run's DECRYPTED answers {slug: plaintext}
-Task<byte[]> FlowRunDocumentAsync(string runId, CancellationToken ct = default)       // #491 gap 2 — the company's own copy of a run's generated contract (plaintext bytes)
+Task<byte[]> FlowRunDocumentAsync(string runId, string outputKey, CancellationToken ct = default)   // the company's own copy of one generated output document (plaintext bytes)
 Task<Identity> IdentityAsync(CancellationToken ct = default)                          // #491 gap 3 — this client's {CompanyUserId, ServiceId}
 ```
 
@@ -791,7 +793,12 @@ Task<Identity> IdentityAsync(CancellationToken ct = default)                    
 var run = await client.FlowRunAsync(runId);
 Dictionary<string, object?> answers = client.FlowRunAnswers(run);   // {"work_email": "alice@example.com", …}
 
-byte[] pdf = await client.FlowRunDocumentAsync(runId);              // 404 (ApiException) until the run generates a document
+// A document leaf can produce several output documents; download the company's copy of each.
+var own = run.Participants.FirstOrDefault(p => p.PartyKey == run.CompanyPartyKey);
+foreach (var d in own?.Documents ?? Array.Empty<FlowRunParticipantDocument>())
+{
+    byte[] pdf = await client.FlowRunDocumentAsync(runId, d.OutputKey!);
+}
 
 Identity me = await client.IdentityAsync();
 var bindings = new Dictionary<string, string>
@@ -803,7 +810,9 @@ await client.TriggerFlowRunAsync(flowId, connection.Id!, bindings);
 ```
 
 * `FlowRunAnswers(run)` returns a completed run's decrypted `{slug: plaintext}` answers (pass a fetched `FlowRun`). It is the public accessor for a finished run's answers, which `ProcessFlowRunAsync` returns untouched.
-* `FlowRunDocumentAsync(runId)` downloads the company's own service-key-encrypted copy of a run's generated contract and returns the plaintext file bytes (`404` until the run generates a document) — the honest completion step (fill → complete → `FlowRunAnswers` → `FlowRunDocumentAsync`).
+* A document leaf can produce several named **output documents** (e.g. "Contract" and "Addendum"). `GenerateFlowDocumentAsync(run)` returns the API response `{documents, status}` — one `{output_key, party_key, document_id, position}` per produced (output document, participant); `position` is the step's 1-based place in the run's ONE signing line (one signer at a time, across every output), null for a party an output's signer list does not name. A repeat answers the same set.
+* A `FlowRun`'s `Participants` are `FlowRunParticipant(PartyKey, PersonUserId, ConnectionId, Documents)`; `Documents` is that participant's own copy of each output document — `FlowRunParticipantDocument(OutputKey, Name, DocumentId, DocumentStatus, RequiresSignature, RequiresAcceptance, Position, Action, ActedAt)`, ordered by line position.
+* `FlowRunDocumentAsync(runId, outputKey)` downloads the company's own service-key-encrypted copy of one output document and returns the plaintext file bytes — the honest completion step (fill → complete → `FlowRunAnswers` → `FlowRunDocumentAsync` per output). A `404` is `flows.run_not_found` for an unknown run, or `flows.no_document` when that output was not produced or the company is not a bound party.
 * `IdentityAsync()` returns this client's `{CompanyUserId, ServiceId}` from `GET /api/company-data/whoami`, so a `TriggerFlowRunAsync` binding's **company** party can bind to `CompanyUserId` (the person party's user id comes from the connection).
 
 **The party that answers a run's last step generates the contract — the customer role included.**
@@ -816,8 +825,9 @@ Task<object?> GenerateFlowDocumentAsync(string connectionId, FlowRun run, Cancel
 
 Pass the run as re-read after your leaf submit. The answer map comes from your OWN copy of the run's
 answers, opened with the account key — every party's answers are sealed to every bound party, so that
-copy holds the whole run and no service key is involved. Returns `{document_id, documents, status}`;
-a repeat answers the same document set. Throws `ConfigException` when the run's current step is not
+copy holds the whole run and no service key is involved. Returns `{documents, status}` — one
+`{output_key, party_key, document_id, position}` per produced (output document, participant); a repeat
+answers the same set. Throws `ConfigException` when the run's current step is not
 bound to your company.
 
 ### Plugin fields on the company's step

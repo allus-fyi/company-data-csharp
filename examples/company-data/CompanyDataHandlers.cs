@@ -29,7 +29,7 @@ public sealed class Run : IRun
 }
 
 /// <summary>
-/// The company-data family's scenario handlers (contract v3, company-data family). HTTP dispatch → handler
+/// The company-data family's scenario handlers (contract v4, company-data family). HTTP dispatch → handler
 /// → the SDK's intended top-level surface ONLY (no raw platform HTTP, no SDK internals).
 ///
 /// Five scenarios, all namespaced companydata:*, all using the SERVICE-role data <see cref="Client"/>:

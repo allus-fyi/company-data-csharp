@@ -12,7 +12,7 @@ one server:
 About 90 % of the logic is a shared frontend fetched from a pinned release; this
 directory is the thin .NET backend that implements the
 [demo-backend contract](https://github.com/allme-sdk/example-test-suite)
-(**contractVersion 3**). Everything the handlers do goes through the SDK's
+(**contractVersion 4**). Everything the handlers do goes through the SDK's
 **intended top-level surface** — `OAuthClient`, `Client`, `Client.TwoFactor`, the
 flow surface, `VerifyWebhook()` / `ParseWebhook()`, `CreateDocumentAsync()` — never
 internals, never raw platform HTTP. The identity OIDC scenario (5) additionally
@@ -147,7 +147,7 @@ finds the run by it.
 | Each poll — read the run | `Client.FlowRunAsync(flowRunId)` |
 | Drive one company step | `Client.ProcessFlowRunAsync(flowRunId, fillNode)` (a rejected value throws `ValidationException`) |
 | On completion — answers | `Client.FlowRunAnswers(run)` (decrypted `{slug: value}`) |
-| On completion — document | `Client.FlowRunDocumentAsync(flowRunId)` (contract fixture only) |
+| On completion — documents | `Client.FlowRunDocumentAsync(flowRunId, outputKey)` for each output document in the company participant's `Documents` (contract fixture only) |
 
 The handler lives in **`flow/FlowHandlers.cs`**. The platform flow-run id is never a
 browser input: the demo runId **is** the backend run, and `TriggerFlowRunAsync`'s
@@ -159,6 +159,11 @@ waits. The demo ships two importable flow packages in **`flow/fixtures/`**:
 |---|---|
 | `flow/fixtures/info-gathering.zip` | `data_only` — a few company steps (text, an **email** validation-demo step, an address composite) then one person turn. |
 | `flow/fixtures/contract.zip` | `document` — a company step, then a signature leaf that generates a document. |
+
+A document leaf can produce several named **output documents** (e.g. "Contract" and "Addendum").
+Generation answers `{documents: [{output_key, party_key, document_id, position}], status}` — one entry
+per produced (output document, participant). On completion the handler downloads the company's own
+copy of EACH output and reports them as `documents: [{output_key, status, downloaded}]`.
 
 ### company-data (the five `companydata:*`)
 

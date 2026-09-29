@@ -13,7 +13,7 @@ using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging;
 
 // One-command launcher for the allus company-data SDK example test suite — ALL THREE scenario families
-// (identity + flow + company-data) on ONE server, ONE port (contractVersion 3; see README).
+// (identity + flow + company-data) on ONE server, ONE port (contractVersion 4; see README).
 //
 //   dotnet run
 //
@@ -27,7 +27,7 @@ using Microsoft.Extensions.Logging;
 //      single-worker (contract: no cross-request concurrency to guard) — so a phone on the same network
 //      can reach it, printing every URL it is reachable on.
 
-const int ContractVersion = Dispatcher.ContractVersion; // 3
+const int ContractVersion = Dispatcher.ContractVersion; // 4
 const string ReleaseBase = "https://github.com/allme-sdk/example-test-suite/releases/download";
 
 var baseDir = FindBaseDir();

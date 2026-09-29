@@ -621,9 +621,10 @@ public sealed record Document(
     // method, content_sha256, plain_sha256, signer_first_name, signer_last_name,
     // signer_name_verified, ip, user_agent, created_at.
     IReadOnlyList<object?>? Signatures = null,
-    // Present only on a contract-flow run-participant document: the run's ordered signature
-    // summary, one entry per participant owing an act — each
-    // {party_key, document_id, position, status, action, acted_at}. Null on any other document.
+    // Present only on a contract-flow run-participant document: the WHOLE run's signing line,
+    // one entry per (output document, participant) in line order — each
+    // {output_key, name, party_key, document_id, position, status, action, acted_at}. Every
+    // document of the run carries the same summary. Null on any other document.
     IReadOnlyList<object?>? RunSignatures = null)
 {
     // The raw value Node (used by Json() to detect an {"_enc":1,…} per-person wrapper) + the
@@ -730,7 +731,6 @@ public sealed record FlowRun(
     IReadOnlyDictionary<string, string> Bindings,
     string? Status,
     string? CurrentNode,
-    string? DocumentId,
     string? OutputMode,
     Node Definition,
     IReadOnlyList<Node> Answers,
@@ -809,7 +809,6 @@ public sealed record FlowRun(
             Bindings: bindings,
             Status: obj.Get("status").AsString(),
             CurrentNode: obj.Get("current_node").AsString(),
-            DocumentId: obj.Get("document_id").AsString(),
             OutputMode: outputMode,
             Definition: definition,
             Answers: answers,
@@ -829,27 +828,25 @@ public sealed record FlowRun(
 }
 
 /// <summary>
-/// One participant's row on a run's <c>participants[]</c> (flows.html §5a/§9 item 12) — the
-/// durable participant set, additively carrying its place in the leaf PDF rule's ordered signing
-/// plan. One account may hold TWO of these (two owner parties, or one customer bound to two
-/// party keys) — never collapse this to a single row by user id.
+/// One of a participant's own documents on a run — one per output document the leaf produced for
+/// that participant. <see cref="Position"/> is the step's 1-based place in the run's ONE signing
+/// line; null for a party the output's signer list does not name (its copy is <c>active</c> from
+/// the start, owing nothing).
 /// </summary>
-public sealed record FlowRunParticipant(
-    string? PartyKey,
-    string? PersonUserId,
-    string? ConnectionId,
+public sealed record FlowRunParticipantDocument(
+    string? OutputKey,
+    string? Name,
     string? DocumentId,
     string? DocumentStatus,
     bool RequiresSignature,
     bool RequiresAcceptance,
-    int? Position,   // 1-based place in the signing plan; null for a party the plan does not name
-    string? Action,  // "signed" | "accepted" | null — null until this participant's document has acted
+    int? Position,
+    string? Action,  // "signed" | "accepted" | null — null until this document has been acted on
     string? ActedAt)
 {
-    public static FlowRunParticipant FromApi(Node obj) => new(
-        PartyKey: obj.Get("party_key").AsString(),
-        PersonUserId: obj.Get("person_user_id").AsString(),
-        ConnectionId: obj.Get("connection_id").AsString(),
+    public static FlowRunParticipantDocument FromApi(Node obj) => new(
+        OutputKey: obj.Get("output_key").AsString(),
+        Name: obj.Get("name").AsString(),
         DocumentId: obj.Get("document_id").AsString(),
         DocumentStatus: obj.Get("document_status").AsString(),
         RequiresSignature: ModelCoerce.CoerceBool(obj.Get("requires_signature")) ?? false,
@@ -857,6 +854,28 @@ public sealed record FlowRunParticipant(
         Position: obj.Get("position").Kind == NodeKind.Scalar && int.TryParse(obj.Get("position").AsString(), out var pos) ? pos : null,
         Action: obj.Get("action").AsString(),
         ActedAt: obj.Get("acted_at").AsString());
+}
+
+/// <summary>
+/// One participant's row on a run's <c>participants[]</c> — the durable participant set.
+/// <see cref="Documents"/> holds the participant's own copy of every output document the run
+/// produced, ordered by signing-line position (unlisted last); empty before generation. One account
+/// may hold TWO of these (two owner parties, or one customer bound to two party keys) — never
+/// collapse this to a single row by user id.
+/// </summary>
+public sealed record FlowRunParticipant(
+    string? PartyKey,
+    string? PersonUserId,
+    string? ConnectionId,
+    IReadOnlyList<FlowRunParticipantDocument> Documents)
+{
+    public static FlowRunParticipant FromApi(Node obj) => new(
+        PartyKey: obj.Get("party_key").AsString(),
+        PersonUserId: obj.Get("person_user_id").AsString(),
+        ConnectionId: obj.Get("connection_id").AsString(),
+        Documents: obj.Get("documents").Kind == NodeKind.List
+            ? obj.Get("documents").AsList().Where(d => d.Kind == NodeKind.Object).Select(FlowRunParticipantDocument.FromApi).ToList()
+            : Array.Empty<FlowRunParticipantDocument>());
 }
 
 /// <summary>A service activity-log entry — ops events only, never person data.</summary>

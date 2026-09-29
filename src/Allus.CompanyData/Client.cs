@@ -862,7 +862,7 @@ public sealed class Client : IDisposable
     /// <item>a PER-PERSON / private document is encrypted to the RECIPIENT's key and served as
     /// <c>{"encrypted":true,"value":{"_enc":1,…}}</c> — the company CANNOT decrypt that with its
     /// service key, so this fails clearly (<see cref="ApiException"/> <c>documents.recipient_encrypted</c>)
-    /// rather than attempting a doomed service-key decrypt. For a generated flow contract's OWN copy
+    /// rather than attempting a doomed service-key decrypt. For a generated flow document's OWN copy
     /// the company uses <see cref="FlowRunDocumentAsync"/> — that copy IS service-key-encrypted.</item>
     /// </list>
     /// </summary>
@@ -875,7 +875,7 @@ public sealed class Client : IDisposable
                 0,
                 "documents.recipient_encrypted",
                 "This document is encrypted to its recipient and is not readable with the company service key. "
-                + "For a generated flow contract, use FlowRunDocumentAsync(runId) to download the company copy.");
+                + "For a generated flow document, use FlowRunDocumentAsync(runId, outputKey) to download the company copy.");
         }
         return raw; // broadcast / plaintext bytes
     }
@@ -1139,16 +1139,19 @@ public sealed class Client : IDisposable
     public Dictionary<string, object?> FlowRunAnswers(FlowRun run) => DecryptRunAnswers(run);
 
     /// <summary>
-    /// Download the company's OWN copy of a run's generated flow contract — the PLAINTEXT
-    /// file bytes. GETs <c>/flow-runs/{runId}/document/file</c>, which serves the company-party copy
-    /// encrypted to the SERVICE key (unlike <see cref="DocumentFileAsync"/>'s recipient-targeted copy),
-    /// so the same <see cref="BinaryHandle"/> the slot-file download uses decrypts it → the
-    /// <c>{"file":"data:…;base64,…"}</c> envelope → the file bytes. A 404 (<see cref="ApiException"/>)
-    /// surfaces when the run has not generated a document yet.
+    /// Download the company's OWN copy of one output document a run generated — the PLAINTEXT file
+    /// bytes. <paramref name="outputKey"/> names the output document (the <c>OutputKey</c> of an entry
+    /// in the company participant's <c>Documents</c>, or the <c>output_key</c> of a generate response's
+    /// <c>documents</c> entry). GETs <c>/flow-runs/{runId}/documents/{outputKey}/file</c>, which serves
+    /// the company-party copy encrypted to the SERVICE key (unlike <see cref="DocumentFileAsync"/>'s
+    /// recipient-targeted copy), so the same <see cref="BinaryHandle"/> the slot-file download uses
+    /// decrypts it → the <c>{"file":"data:…;base64,…"}</c> envelope → the file bytes. A 404
+    /// (<see cref="ApiException"/>) is <c>flows.run_not_found</c> for an unknown run, or
+    /// <c>flows.no_document</c> when that output was not produced or the company is not a bound party.
     /// </summary>
-    public async Task<byte[]> FlowRunDocumentAsync(string runId, CancellationToken ct = default)
+    public async Task<byte[]> FlowRunDocumentAsync(string runId, string outputKey, CancellationToken ct = default)
     {
-        var handle = new BinaryHandle($"{FlowRunsPath}/{runId}/document/file", BinaryFetchImpl, DecryptValueImpl);
+        var handle = new BinaryHandle($"{FlowRunsPath}/{runId}/documents/{outputKey}/file", BinaryFetchImpl, DecryptValueImpl);
         return await handle.BytesAsync(ct).ConfigureAwait(false);
     }
 
@@ -1362,7 +1365,9 @@ public sealed class Client : IDisposable
     /// <summary>
     /// Document-mode company leaf: one-time-key value gather → POST /generate. Seals the company's
     /// decrypted answers with the one-time-key bundle and POSTs {otk, values}. Returns the API response
-    /// Node {document_id, documents, status} (idempotent — a repeat answers the same document set).
+    /// Node {documents, status} — documents is one {output_key, party_key, document_id, position} per
+    /// produced (output document, participant), position the step's 1-based place in the run's signing
+    /// line or null for an unlisted party (idempotent — a repeat answers the same set).
     /// </summary>
     public async Task<Node> GenerateFlowDocumentAsync(FlowRun run, CancellationToken ct = default)
     {
@@ -1374,8 +1379,9 @@ public sealed class Client : IDisposable
     /// High-level company turn: load → (if our turn) fill + advance + generate.
     /// <paramref name="fillNode"/>(node, answers) returns {slug: value}; the SDK encrypts per party,
     /// submits, and — if the submit landed on a document-mode leaf — calls
-    /// <see cref="GenerateFlowDocumentAsync"/>. Returns the latest <see cref="FlowRun"/>; when the run
-    /// is not awaiting the company it is returned untouched.
+    /// <see cref="GenerateFlowDocumentAsync"/>. Returns the latest <see cref="FlowRun"/> — after a
+    /// generate, each participant's produced documents are on its <c>Documents</c>; when the run is not
+    /// awaiting the company it is returned untouched.
     /// </summary>
     public async Task<FlowRun> ProcessFlowRunAsync(
         string runId,

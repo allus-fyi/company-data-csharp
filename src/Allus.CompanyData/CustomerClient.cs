@@ -305,8 +305,9 @@ public sealed class CustomerClient
     /// run as re-read then. The whole answer map comes from this company's OWN copy of the answers,
     /// opened with the account key — every party's answers are sealed to every bound party, so that
     /// copy holds the whole run and no service key is involved — and is sealed with the one-time-key
-    /// bundle. Returns the API response {document_id, documents, status} (idempotent — a repeat answers
-    /// the same document set). Throws <see cref="ConfigException"/> when the run's current step is not
+    /// bundle. Returns the API response {documents, status} — documents is one {output_key, party_key,
+    /// document_id, position} per produced (output document, participant) (idempotent — a repeat
+    /// answers the same set). Throws <see cref="ConfigException"/> when the run's current step is not
     /// bound to this company — the participant the run lists on <paramref name="connectionId"/>.
     /// </summary>
     public async Task<object?> GenerateFlowDocumentAsync(string connectionId, FlowRun run, System.Threading.CancellationToken ct = default)

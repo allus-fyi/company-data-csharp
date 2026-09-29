@@ -41,13 +41,13 @@ public sealed class Run : IRun
 
     // Terminal extras (present once the flow completes).
     public List<Dictionary<string, object?>>? Answers { get; set; }
-    public Dictionary<string, object?>? Document { get; set; }
+    public List<Dictionary<string, object?>>? Documents { get; set; }
 
     public string? Error { get; set; }
 }
 
 /// <summary>
-/// The flow family's ONE scenario handler (contract v3, flow family). HTTP dispatch → handler → the SDK's
+/// The flow family's ONE scenario handler (contract v4, flow family). HTTP dispatch → handler → the SDK's
 /// intended top-level flow surface only (IdentityAsync / TriggerFlowRunAsync / FlowRunAsync /
 /// ProcessFlowRunAsync / FlowRunAnswers / FlowRunDocumentAsync). Handlers NEVER perform raw platform HTTP.
 ///
@@ -88,9 +88,9 @@ public sealed class FlowHandlers
     private const string CallConnections = "Client.ConnectionsAsync — resolves the person's own share code to the connection whose id the CUSTOMER party binds to";
     private const string CallTrigger = "Client.TriggerFlowRunAsync — starts a run of the published flow for that connection, pinning the flow's latest published version";
     private const string CallFlowRun = "Client.FlowRunAsync — re-read on every poll to see whose turn the run is on";
-    private const string CallProcess = "Client.ProcessFlowRunAsync — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the document when the submit lands on a document-mode leaf";
+    private const string CallProcess = "Client.ProcessFlowRunAsync — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the output documents when the submit lands on a document-mode leaf";
     private const string CallAnswers = "Client.FlowRunAnswers — the completed run's answers, decrypted with the service key";
-    private const string CallDocument = "Client.FlowRunDocumentAsync — downloads the company's own copy of the generated contract and decrypts it with the service key";
+    private const string CallDocument = "Client.FlowRunDocumentAsync — downloads the company's own copy of output document {0} and decrypts it with the service key";
 
     private readonly Runtime _rt;
 
@@ -277,7 +277,7 @@ public sealed class FlowHandlers
     /// <summary>
     /// The idempotent, short-cycled poll that IS the drive loop and the resume. Reads the platform run;
     /// if it is the company's turn drives exactly ONE step; on completion fetches the answers and
-    /// (document-mode) downloads the generated contract. A terminal run returns its cached result on
+    /// (document-mode) downloads every generated output document. A terminal run returns its cached result on
     /// every poll until TTL/Clear.
     /// </summary>
     public async Task RunStatus(HttpContext ctx, string runId)
@@ -406,8 +406,9 @@ public sealed class FlowHandlers
     }
 
     /// <summary>
-    /// Terminal: fetch the decrypted answers and, for a document-mode run, download the generated
-    /// contract's company copy (FlowRunDocumentAsync — the run-scoped, service-key-decryptable surface).
+    /// Terminal: fetch the decrypted answers and, for a document-mode run, download the company's copy
+    /// of EVERY output document the run produced (FlowRunDocumentAsync — the run-scoped,
+    /// service-key-decryptable surface).
     /// </summary>
     private async Task<Run> Complete(Run run, Client client, FlowRun flowRun, string flowRunId)
     {
@@ -425,28 +426,52 @@ public sealed class FlowHandlers
 
         if (flowRun.OutputMode == "document")
         {
-            try
+            var documents = new List<Dictionary<string, object?>>();
+            foreach (var outputKey in CompanyOutputKeys(flowRun))
             {
-                AddCall(run, CallDocument);
-                var bytes = await client.FlowRunDocumentAsync(flowRunId);
-                run.Document = new Dictionary<string, object?>
+                try
                 {
-                    ["status"] = "downloaded", ["downloaded"] = true, ["bytes"] = bytes.Length,
-                };
-            }
-            catch (ApiException e)
-            {
-                // The run completed but the document is not retrievable yet — report it, don't fail.
-                run.Document = new Dictionary<string, object?>
+                    AddCall(run, string.Format(CallDocument, outputKey));
+                    var bytes = await client.FlowRunDocumentAsync(flowRunId, outputKey);
+                    documents.Add(new Dictionary<string, object?>
+                    {
+                        ["output_key"] = outputKey, ["status"] = "downloaded", ["downloaded"] = true, ["bytes"] = bytes.Length,
+                    });
+                }
+                catch (ApiException e)
                 {
-                    ["status"] = "unavailable", ["downloaded"] = false, ["error"] = e.Message,
-                };
+                    // The run completed but this output is not retrievable — report it, don't fail.
+                    documents.Add(new Dictionary<string, object?>
+                    {
+                        ["output_key"] = outputKey, ["status"] = "unavailable", ["downloaded"] = false, ["error"] = e.Message,
+                    });
+                }
             }
+            run.Documents = documents;
         }
 
         run.Status = "completed";
         run.Completed = true;
         return run;
+    }
+
+    /// <summary>
+    /// The output keys of the documents the run produced for the company, in signing-line order, each
+    /// once — read off every participant row bound to the company's own user id (a company can hold
+    /// more than one party of a run, and each such row carries a copy of every output).
+    /// </summary>
+    private static List<string> CompanyOutputKeys(FlowRun flowRun)
+    {
+        var keys = new List<string>();
+        foreach (var participant in flowRun.Participants)
+        {
+            if (participant.PersonUserId != flowRun.CompanyUserId) continue;
+            foreach (var doc in participant.Documents)
+            {
+                if (!string.IsNullOrEmpty(doc.OutputKey) && !keys.Contains(doc.OutputKey)) keys.Add(doc.OutputKey);
+            }
+        }
+        return keys;
     }
 
     /// <summary>
@@ -473,7 +498,7 @@ public sealed class FlowHandlers
     /// <summary>
     /// The GET /api/runs/{runId} response: the SHARED run envelope (outer
     /// {status:"pending"|"done"|"failed", result?, error?, calls}) with the pinned FLOW shape nested
-    /// under `result` ({status:"running"|"waiting_person"|"completed", steps, answers?, document?}). The
+    /// under `result` ({status:"running"|"waiting_person"|"completed", steps, answers?, documents?}). The
     /// shared frontend reads progress ONLY from `run.result` and keeps polling ONLY while the outer
     /// status is "pending", so the inner flow status must NOT sit at the top level — it drives under
     /// "pending" until the platform run completes ("done") or errors ("failed").
@@ -495,7 +520,7 @@ public sealed class FlowHandlers
 
         var result = new Dictionary<string, object?> { ["status"] = flowStatus, ["steps"] = steps };
         if (run.Answers is not null) result["answers"] = run.Answers;
-        if (run.Document is not null) result["document"] = run.Document;
+        if (run.Documents is not null) result["documents"] = run.Documents;
 
         var outMap = new Dictionary<string, object?>
         {

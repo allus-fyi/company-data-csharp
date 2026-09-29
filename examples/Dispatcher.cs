@@ -16,7 +16,7 @@ namespace Allus.ExampleTestSuite;
 /// </summary>
 public sealed class Dispatcher
 {
-    public const int ContractVersion = 3; // the single backend implements contract v3
+    public const int ContractVersion = 4; // the single backend implements contract v4
     public const string Sdk = "csharp";
 
     private enum Family { Identity, Flow, CompanyData }
@@ -45,7 +45,7 @@ public sealed class Dispatcher
         _companyData = new CompanyDataHandlers(rt);
     }
 
-    // ── GET /api/meta — ALL scenarios of ALL families, contractVersion 3 ─────────
+    // ── GET /api/meta — ALL scenarios of ALL families, contractVersion 4 ─────────
 
     public Task Meta(HttpContext ctx) => Web.WriteJson(ctx, new
     {

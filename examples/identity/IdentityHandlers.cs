@@ -39,7 +39,7 @@ public sealed class Run : IRun
 }
 
 /// <summary>
-/// The identity family's scenario handlers (contract v3, identity scenarios 1–5, 7–8). HTTP dispatch → handler
+/// The identity family's scenario handlers (contract v4, identity scenarios 1–5, 7–8). HTTP dispatch → handler
 /// → the SDK's intended top-level surface (or the OIDC library for scenario 5). Handlers NEVER perform
 /// raw platform HTTP and NEVER block on the SDK's long defaults — detached / challenge waits are
 /// short-cycled (timeout=2) inside GET /api/runs.

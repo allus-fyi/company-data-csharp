@@ -4,7 +4,7 @@
     The allus company-data C# SDK example test suite.
 
     ONE project that hosts a thin localhost backend implementing the demo-backend
-    contract (contractVersion 3) for ALL THREE scenario families in one server on
+    contract (contractVersion 4) for ALL THREE scenario families in one server on
     one port:
       identity/     — sign in / OIDC / 2FA          (scenarios 1–5, 7–8)
       flow/         — run a contract flow            (flow:run)

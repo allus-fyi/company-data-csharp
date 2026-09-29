@@ -73,8 +73,14 @@ public sealed class FlowRunTests : IDisposable
     }
     """;
 
+    private static readonly object Generated = new
+    {
+        documents = new object[] { new { output_key = "out_1", party_key = "company", document_id = "doc-9", position = 1 } },
+        status = "awaiting_signature",
+    };
+
     private static object RunObj(string status = "awaiting_company", string current = "n1",
-        object? answers = null, string? defJson = null, string outputMode = "data_only", string? documentId = null)
+        object? answers = null, string? defJson = null, string outputMode = "data_only", string? companyDocumentId = null)
     {
         using var def = JsonDocument.Parse(defJson ?? FlowDefJson);
         return new
@@ -88,7 +94,27 @@ public sealed class FlowRunTests : IDisposable
             bindings = new Dictionary<string, string> { ["company"] = CompanyUid, ["person"] = PersonUid },
             status,
             current_node = current,
-            document_id = documentId,
+            participants = new object[]
+            {
+                new
+                {
+                    party_key = "company",
+                    person_user_id = CompanyUid,
+                    connection_id = (string?)null,
+                    documents = companyDocumentId == null
+                        ? new object[0]
+                        : new object[]
+                        {
+                            new
+                            {
+                                output_key = "out_1", name = "Contract", document_id = companyDocumentId,
+                                document_status = "ready_to_sign", requires_signature = true,
+                                requires_acceptance = false, position = 1, action = (string?)null,
+                                acted_at = (string?)null,
+                            },
+                        },
+                },
+            },
             output_mode = outputMode,
             definition = JsonSerializer.Deserialize<object>(def.RootElement.GetRawText()),
             answers = answers ?? new object[0],
@@ -304,13 +330,14 @@ public sealed class FlowRunTests : IDisposable
         {
             capturedUrl = url;
             captured = ParseBody(body);
-            return Resp.Json(200, new { document_id = "doc-9", status = "awaiting_signature" });
+            return Resp.Json(200, Generated);
         });
         using (client)
         {
             var run = RunFromObj(RunObj("generating", "n1", answers, outputMode: "document"));
             var res = await client.GenerateFlowDocumentAsync(run);
-            Assert.Equal("doc-9", res.Get("document_id").AsString());
+            Assert.Equal("doc-9", res.Get("documents").AsList()[0].Get("document_id").AsString());
+            Assert.Equal("out_1", res.Get("documents").AsList()[0].Get("output_key").AsString());
             Assert.EndsWith("/company-data/flow-runs/run-1/generate", capturedUrl);
 
             var otk = Convert.FromBase64String(captured.GetProperty("otk").GetString()!);
@@ -347,7 +374,7 @@ public sealed class FlowRunTests : IDisposable
                 {
                     var status = posts.Count > 0 ? "awaiting_signature" : "awaiting_company";
                     var docId = posts.Count > 0 ? "doc-9" : null;
-                    return Resp.Json(200, RunObj(status, "n1", defJson: single, outputMode: "document", documentId: docId));
+                    return Resp.Json(200, RunObj(status, "n1", defJson: single, outputMode: "document", companyDocumentId: docId));
                 }
                 if (url.EndsWith("/company-data/connections/csc-1"))
                     return Resp.Json(200, new { connection_id = "csc-1", share_code = "ABC123" });
@@ -361,7 +388,7 @@ public sealed class FlowRunTests : IDisposable
                 if (url.EndsWith("/answers"))
                     return Resp.Json(200, RunObj("generating", "n1", defJson: single, outputMode: "document"));
                 Assert.EndsWith("/generate", url);
-                return Resp.Json(200, new { document_id = "doc-9", status = "awaiting_signature" });
+                return Resp.Json(200, Generated);
             });
         using (client)
         {
@@ -370,7 +397,8 @@ public sealed class FlowRunTests : IDisposable
             Assert.Contains(posts, p => p.EndsWith("/answers"));
             Assert.Contains(posts, p => p.EndsWith("/generate"));
             Assert.Equal("awaiting_signature", run.Status);
-            Assert.Equal("doc-9", run.DocumentId);
+            Assert.Equal("doc-9", run.Participants[0].Documents[0].DocumentId);
+            Assert.Equal("out_1", run.Participants[0].Documents[0].OutputKey);
         }
     }
 
