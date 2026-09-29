@@ -1090,6 +1090,16 @@ public sealed class Client : IDisposable
     // ── contract-flow runs (company side — the company is a bound party) ─────────────────────────
 
     /// <summary>
+    /// The latest PUBLISHED version of a flow → <see cref="PublishedFlow"/> (version, definition and the
+    /// service's request-field types). <c>GET /api/company-data/flows/{flowId}/published</c>.
+    /// </summary>
+    public async Task<PublishedFlow> PublishedFlowAsync(string flowId, CancellationToken ct = default)
+    {
+        var body = await _http.GetAsync($"{FlowsPath}/{flowId}/published", ct: ct).ConfigureAwait(false);
+        return PublishedFlow.FromApi(body);
+    }
+
+    /// <summary>
     /// Start a run for a connection with no connection-source copies — the overload below with no
     /// <c>sourceFiles</c>.
     /// </summary>
@@ -1111,25 +1121,132 @@ public sealed class Client : IDisposable
     /// <c>flows.source_files_invalid</c>, whose <see cref="ApiException.Details"/> carry
     /// <c>missing</c> (<c>[{source_key, for_user_id}]</c>) and <c>unexpected</c> (<c>[file]</c>);
     /// nothing is written.</para>
+    /// <para>
+    /// Reads the flow's latest published version (<see cref="PublishedFlowAsync"/>) and pins it with
+    /// <c>flow_version</c>. When that version's text elements show the connected customer's shared
+    /// values (<c>{{party.field}}</c> tags), the SDK opens those values with the service key and seals
+    /// them per recipient — one wrapper of the non-private values and one per private value, to the
+    /// company (the service key) and to the customer — and sends them as <c>tag_values</c>. A newer
+    /// publish in between (<c>flows.version_changed</c>) is re-read and retried once; a customer key
+    /// that changed (<c>flows.tag_values_stale</c>) is re-read and retried once. A stale SERVICE key
+    /// throws <see cref="ConfigException"/>: rebuild the client with the service's current private key.
+    /// </para>
     /// </summary>
     public async Task<FlowRun> TriggerFlowRunAsync(
         string flowId, string connectionId, IReadOnlyDictionary<string, string> bindings,
         IReadOnlyList<FlowRunSourceFile>? sourceFiles, CancellationToken ct = default)
     {
-        var body = new Dictionary<string, object?>
+        var published = await PublishedFlowAsync(flowId, ct).ConfigureAwait(false);
+        var versionRetried = false;
+        var staleRetried = false;
+        while (true)
         {
-            ["target"] = new Dictionary<string, object?> { ["connection_id"] = connectionId },
-            ["bindings"] = bindings,
-        };
-        if (sourceFiles is { Count: > 0 })
-            body["source_files"] = sourceFiles.Select(f => new Dictionary<string, object?>
+            var body = new Dictionary<string, object?>
             {
-                ["source_key"] = f.SourceKey,
-                ["for_user_id"] = f.ForUserId,
-                ["file"] = f.File,
-            }).ToList();
-        var created = await _http.PostAsync($"{FlowsPath}/{flowId}/runs", jsonBody: body, ct: ct).ConfigureAwait(false);
-        return FlowRun.FromApi(created);
+                ["target"] = new Dictionary<string, object?> { ["connection_id"] = connectionId },
+                ["bindings"] = bindings,
+                ["flow_version"] = published.Version,
+            };
+            if (sourceFiles is { Count: > 0 })
+                body["source_files"] = sourceFiles.Select(f => new Dictionary<string, object?>
+                {
+                    ["source_key"] = f.SourceKey,
+                    ["for_user_id"] = f.ForUserId,
+                    ["file"] = f.File,
+                }).ToList();
+            string? shareCode = null;
+            var tags = FlowText.NonOwnerPartyTags(published.Definition);
+            if (tags.Count > 0)
+            {
+                var (tagValues, sc) = await CompileTagValuesAsync(tags, published, connectionId, ct).ConfigureAwait(false);
+                body["tag_values"] = tagValues;
+                shareCode = sc;
+            }
+            try
+            {
+                var created = await _http.PostAsync($"{FlowsPath}/{flowId}/runs", jsonBody: body, ct: ct).ConfigureAwait(false);
+                return FlowRun.FromApi(created);
+            }
+            catch (ApiException e) when (e.ErrorKey == "flows.version_changed" && !versionRetried)
+            {
+                versionRetried = true;
+                published = await PublishedFlowAsync(flowId, ct).ConfigureAwait(false);
+            }
+            catch (ApiException e) when (e.ErrorKey == "flows.tag_values_stale")
+            {
+                var stale = e.Details.TryGetValue("stale", out var s) && s is System.Collections.IEnumerable list && s is not string
+                    ? list.Cast<object?>().Select(x => x?.ToString()).ToList()
+                    : new List<string?>();
+                if (stale.Contains("company"))
+                    throw new ConfigException(
+                        "the configured service private key is not this service's current key — "
+                        + "rebuild the client with the current service private key");
+                if (staleRetried || shareCode is null) throw;
+                staleRetried = true;
+                InvalidatePublicKey(shareCode);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The <c>tag_values</c> for one start, and the customer's share code: the connected customer's
+    /// shared values the text names, opened with the service key and sealed to the company (the
+    /// service key) and to the customer. A value that is absent or does not open is left out;
+    /// <c>values_private</c> decides which are private (a slug it does not name is private).
+    /// </summary>
+    private async Task<(Dictionary<string, object?> TagValues, string ShareCode)> CompileTagValuesAsync(
+        IReadOnlyList<FlowText.PartyTag> tags, PublishedFlow published, string connectionId, CancellationToken ct)
+    {
+        var detail = await _http.GetAsync($"{ConnectionsPath}/{connectionId}", ct: ct).ConfigureAwait(false);
+        var userId = detail.Get("user_id").AsString();
+        var shareCode = detail.Get("share_code").AsString();
+        if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(shareCode))
+            throw new ConfigException($"connection {connectionId} has no customer key to seal the run's values to");
+        var entries = new List<(string Tag, bool IsPrivate, Dictionary<string, object?> Value)>();
+        foreach (var t in tags)
+        {
+            var wrapper = detail.Get("values").Get(t.Field).Get("value").AsString();
+            if (string.IsNullOrEmpty(wrapper)) continue;
+            string v;
+            try
+            {
+                v = Crypto.Decrypt(wrapper, _privateKey);
+            }
+            catch (Exception)
+            {
+                continue;
+            }
+            if (string.IsNullOrEmpty(v)) continue;
+            var isPrivate = detail.Get("values_private").Get(t.Field).RawScalar is not false;
+            published.RequestFieldTypes.TryGetValue(t.Field, out var ft);
+            entries.Add((t.Tag, isPrivate, new Dictionary<string, object?> { ["v"] = v, ["t"] = ft }));
+        }
+
+        Dictionary<string, object?> SealedFor(RSA key)
+        {
+            var publicMap = new Dictionary<string, object?>();
+            var priv = new Dictionary<string, object?>();
+            foreach (var e in entries)
+            {
+                if (!e.IsPrivate) publicMap[e.Tag] = e.Value;
+                // One bound customer: every private value the text names is its own.
+                else priv[e.Tag] = Crypto.EncryptForPublicKey(JsonSerializer.Serialize(e.Value), key).ToJsonString();
+            }
+            return new Dictionary<string, object?>
+            {
+                ["recipient_pubkey_sha256"] = Convert.ToHexString(SHA256.HashData(key.ExportSubjectPublicKeyInfo())).ToLowerInvariant(),
+                ["public"] = Crypto.EncryptForPublicKey(JsonSerializer.Serialize(publicMap), key).ToJsonString(),
+                ["public_tags"] = publicMap.Keys.ToList(),
+                ["private"] = priv,
+            };
+        }
+
+        var customerKey = await RecipientPublicKeyAsync(shareCode, ct).ConfigureAwait(false);
+        return (new Dictionary<string, object?>
+        {
+            ["company"] = SealedFor(ServicePublicKey()),
+            [userId] = SealedFor(customerKey),
+        }, shareCode);
     }
 
     /// <summary>

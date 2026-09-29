@@ -133,7 +133,16 @@ public sealed class FlowRunTests : IDisposable
     {
         JsonElement captured = default;
         string capturedUrl = "";
-        var client = MakeRwClient(NoGet, (method, url, body) =>
+        var client = MakeRwClient((url, q) =>
+        {
+            Assert.EndsWith("/company-data/flows/flow-1/published", url);
+            return Resp.Json(200, new
+            {
+                version = 3,
+                definition = new { parties = Array.Empty<object>(), nodes = Array.Empty<object>() },
+                request_field_types = new { },
+            });
+        }, (method, url, body) =>
         {
             capturedUrl = url;
             captured = ParseBody(body);
@@ -145,6 +154,8 @@ public sealed class FlowRunTests : IDisposable
                 new Dictionary<string, string> { ["company"] = CompanyUid, ["person"] = PersonUid });
             Assert.EndsWith("/company-data/flows/flow-1/runs", capturedUrl);
             Assert.Equal("csc-1", captured.GetProperty("target").GetProperty("connection_id").GetString());
+            Assert.Equal(3, captured.GetProperty("flow_version").GetInt32());
+            Assert.False(captured.TryGetProperty("tag_values", out _));
             Assert.Equal("company", run.CompanyPartyKey);
             Assert.Equal(CompanyUid, run.ServiceUserId);
         }

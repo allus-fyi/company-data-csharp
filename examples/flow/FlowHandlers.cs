@@ -86,7 +86,7 @@ public sealed class FlowHandlers
     private const string CallRequestFields = "Client.RequestFieldsAsync — resolves the flow name + published version (the only handle the portal ever shows for it) to its flow id";
     private const string CallIdentity = "Client.IdentityAsync — GET /api/company-data/whoami: this service's own company_user_id, which the COMPANY party binds to";
     private const string CallConnections = "Client.ConnectionsAsync — resolves the person's own share code to the connection whose id the CUSTOMER party binds to";
-    private const string CallTrigger = "Client.TriggerFlowRunAsync — starts a run of the published flow for that connection, pinning the flow's latest published version";
+    private const string CallTrigger = "Client.TriggerFlowRunAsync — starts a run of the published flow for that connection, pinning the flow's latest published version — reads that version first and, when its text shows the customer's shared values, seals them for the company and the customer and sends them with it";
     private const string CallFlowRun = "Client.FlowRunAsync — re-read on every poll to see whose turn the run is on";
     private const string CallProcess = "Client.ProcessFlowRunAsync — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the output documents when the submit lands on a document-mode leaf";
     private const string CallAnswers = "Client.FlowRunAnswers — the completed run's answers, decrypted with the service key";

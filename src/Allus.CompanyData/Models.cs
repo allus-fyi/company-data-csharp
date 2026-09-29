@@ -375,6 +375,12 @@ public sealed record Connection(
     /// <summary>The customer's profile share code (previously only via <see cref="Raw"/>); null when absent.</summary>
     public string? ShareCode { get; init; }
 
+    /// <summary>
+    /// Per answered slug, whether its value is private — the source field's privacy, false for an
+    /// answer with no source field. A slug absent here is private. Metadata only.
+    /// </summary>
+    public IReadOnlyDictionary<string, bool> ValuesPrivate { get; init; } = new Dictionary<string, bool>();
+
     public static Connection FromApi(
         Node obj,
         TypeForSlug typeForSlug,
@@ -411,6 +417,11 @@ public sealed record Connection(
             Raw = obj.ToObjectGraph(),
             CustomerType = obj.Get("customer_type").AsString() ?? id.Get("customer_type").AsString(),
             ShareCode = obj.Get("share_code").AsString() ?? id.Get("share_code").AsString(),
+            ValuesPrivate = obj.Get("values_private").Kind == NodeKind.Object
+                ? obj.Get("values_private").AsObject()
+                    .Where(kv => kv.Value.RawScalar is bool)
+                    .ToDictionary(kv => kv.Key, kv => (bool)kv.Value.RawScalar!)
+                : new Dictionary<string, bool>(),
         };
     }
 }
@@ -764,6 +775,19 @@ public sealed record FlowRun(
     /// </summary>
     public IReadOnlyDictionary<string, string> SourceFiles { get; init; } = new Dictionary<string, string>();
 
+    /// <summary>
+    /// The owning company's profile values the run's owner-party text tags name, fixed at start:
+    /// "party.field" → {"v": value, "t": field_type}. Null on a run whose text names none.
+    /// </summary>
+    public Node? OwnerTagValues { get; init; }
+
+    /// <summary>
+    /// The company's sealed values for the run's non-owner party text tags, fixed at start:
+    /// {"public": wrapper, "public_tags": [tag], "private": {tag: wrapper}}, sealed to the service
+    /// key. Null on a run whose text names none.
+    /// </summary>
+    public Node? TagValues { get; init; }
+
     /// <summary>The party key the company is bound to (Bindings[key] == CompanyUserId).</summary>
     public string? CompanyPartyKey
     {
@@ -835,6 +859,9 @@ public sealed record FlowRun(
                     .Where(kv => kv.Value.RawScalar is string f && f.Length > 0)
                     .ToDictionary(kv => kv.Key, kv => (string)kv.Value.RawScalar!)
                 : new Dictionary<string, string>(),
+            OwnerTagValues = obj.Get("owner_tag_values").Kind == NodeKind.Object ? obj.Get("owner_tag_values") : null,
+            TagValues = obj.Get("tag_values").Kind == NodeKind.Object && obj.Get("tag_values").Get("public").AsString() is not null
+                ? obj.Get("tag_values") : null,
         };
     }
 }
@@ -845,6 +872,26 @@ public sealed record FlowRun(
 /// <see cref="File"/> <see cref="Client.StageRunFileAsync"/> returned.
 /// </summary>
 public sealed record FlowRunSourceFile(string SourceKey, string ForUserId, string File);
+
+/// <summary>
+/// The latest published version of a flow — what <see cref="Client.TriggerFlowRunAsync"/> compiles a
+/// run's text-tag values from. <see cref="RequestFieldTypes"/> is the service's request fields: slug →
+/// field type.
+/// </summary>
+public sealed record PublishedFlow(int Version, Node Definition, IReadOnlyDictionary<string, string> RequestFieldTypes)
+{
+    public static PublishedFlow FromApi(Node obj)
+    {
+        var types = new Dictionary<string, string>();
+        if (obj.Get("request_field_types").Kind == NodeKind.Object)
+            foreach (var (slug, t) in obj.Get("request_field_types").AsObject())
+                if (t.AsString() is { } ts) types[slug] = ts;
+        var version = int.TryParse(obj.Get("version").AsString(), System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0;
+        var def = obj.Get("definition").Kind == NodeKind.Object ? obj.Get("definition") : Node.Object(new Dictionary<string, Node>());
+        return new PublishedFlow(version, def, types);
+    }
+}
 
 /// <summary>
 /// One of a participant's own documents on a run — one per output document the leaf produced for
