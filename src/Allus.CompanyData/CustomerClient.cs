@@ -305,7 +305,11 @@ public sealed class CustomerClient
     /// run as re-read then. The whole answer map comes from this company's OWN copy of the answers,
     /// opened with the account key — every party's answers are sealed to every bound party, so that
     /// copy holds the whole run and no service key is involved — and is sealed with the one-time-key
-    /// bundle. Returns the API response {documents, status} — documents is one {output_key, party_key,
+    /// bundle. Every participant PDF source the leaf's rules name that the run holds for this company
+    /// (a <c>source_field</c> whose own answer is a file, a <c>source_connection</c> in
+    /// <see cref="FlowRun.SourceFiles"/>) is first fetched through <c>answer-files</c>, decrypted with
+    /// the account key, sealed under the same one-time key and uploaded to <c>/generate/inputs</c>.
+    /// Returns the API response {documents, status} — documents is one {output_key, party_key,
     /// document_id, position} per produced (output document, participant) (idempotent — a repeat
     /// answers the same set). Throws <see cref="ConfigException"/> when the run's current step is not
     /// bound to this company — the participant the run lists on <paramref name="connectionId"/>.
@@ -315,8 +319,19 @@ public sealed class CustomerClient
         var own = run.Participants.FirstOrDefault(p => p.ConnectionId == connectionId)?.PersonUserId;
         if (string.IsNullOrEmpty(own) || OwnUserId(run) != own)
             throw new ConfigException($"run {run.Id} is not at a step this company answered");
-        var body = Crypto.OneTimeKeyBundle(DecryptOwnRunAnswers(run));
-        return (await _http.PostAsync($"{Conn}/{connectionId}/flow-runs/{run.Id}/generate", jsonBody: body, ct: ct).ConfigureAwait(false)).ToObjectGraph();
+        var runPath = $"{Conn}/{connectionId}/flow-runs/{run.Id}";
+        var held = FlowSources.Held(run.Definition, run.CurrentNode, run.Answers, own, run.SourceFiles);
+        var res = await FlowSources.GenerateWithInputsAsync(
+            _http, $"{runPath}/generate", DecryptOwnRunAnswers(run), held,
+            async (src, c) =>
+            {
+                // This company's own copy of a held source — its own answer file, or its own copy of
+                // a connection source made at run start — both served by the answer-files route.
+                var resp = await _http.GetResponseAsync(
+                    $"{runPath}/answer-files/{Uri.EscapeDataString(src.File)}", ct: c).ConfigureAwait(false);
+                return DecryptAccount(_http.ParseResponseByContentType(resp));
+            }, ct).ConfigureAwait(false);
+        return res.ToObjectGraph();
     }
 
     /// <summary>Encrypt one answer value for one flow party per the P4 key rule.</summary>
@@ -396,7 +411,12 @@ public sealed class CustomerClient
             if (row.Get("for_user_id").AsString() != own) continue;
             var slug = row.Get("slug").AsString();
             if (string.IsNullOrEmpty(slug) || !row.Has("value") || row.Get("value").IsNull) continue;
-            outMap[slug!] = DecryptAccount(row.Get("value"));
+            // A file answer is a plaintext {"_enc_file": …} reference, not a wrapper; it stands in
+            // the map as that reference, which reads as answered.
+            var value = row.Get("value");
+            outMap[slug!] = FlowSources.FileRef(value) is not null
+                ? FlowSources.FileRefMarker(value)
+                : DecryptAccount(value);
         }
         return outMap;
     }

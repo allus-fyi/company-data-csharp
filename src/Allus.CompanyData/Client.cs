@@ -1090,23 +1090,96 @@ public sealed class Client : IDisposable
     // ── contract-flow runs (company side — the company is a bound party) ─────────────────────────
 
     /// <summary>
+    /// Start a run for a connection with no connection-source copies — the overload below with no
+    /// <c>sourceFiles</c>.
+    /// </summary>
+    public async Task<FlowRun> TriggerFlowRunAsync(
+        string flowId, string connectionId, IReadOnlyDictionary<string, string> bindings,
+        CancellationToken ct = default)
+        => await TriggerFlowRunAsync(flowId, connectionId, bindings, null, ct).ConfigureAwait(false);
+
+    /// <summary>
     /// Start a run for a connection. <paramref name="bindings"/> = {party_key: user_id} covering the
     /// flow's parties (each bound user must be the company or the connected person). Pins the flow's
     /// latest PUBLISHED version. <paramref name="connectionId"/> is the person-side
     /// company_service_connections.id for this service. Returns the created
     /// <see cref="FlowRun"/> (status awaiting_&lt;entry node's party&gt;).
+    /// <para><paramref name="sourceFiles"/>: one staged copy (<see cref="StageRunFileAsync"/>) per
+    /// answered connection source (<c>conn:&lt;party&gt;:&lt;request_slug&gt;</c>) a rule of the pinned
+    /// version names, per distinct bound user — the company's own copy sealed to the service key. A
+    /// start whose list is not exactly that set is refused with <see cref="ApiException"/>
+    /// <c>flows.source_files_invalid</c>, whose <see cref="ApiException.Details"/> carry
+    /// <c>missing</c> (<c>[{source_key, for_user_id}]</c>) and <c>unexpected</c> (<c>[file]</c>);
+    /// nothing is written.</para>
     /// </summary>
     public async Task<FlowRun> TriggerFlowRunAsync(
         string flowId, string connectionId, IReadOnlyDictionary<string, string> bindings,
-        CancellationToken ct = default)
+        IReadOnlyList<FlowRunSourceFile>? sourceFiles, CancellationToken ct = default)
     {
         var body = new Dictionary<string, object?>
         {
             ["target"] = new Dictionary<string, object?> { ["connection_id"] = connectionId },
             ["bindings"] = bindings,
         };
+        if (sourceFiles is { Count: > 0 })
+            body["source_files"] = sourceFiles.Select(f => new Dictionary<string, object?>
+            {
+                ["source_key"] = f.SourceKey,
+                ["for_user_id"] = f.ForUserId,
+                ["file"] = f.File,
+            }).ToList();
         var created = await _http.PostAsync($"{FlowsPath}/{flowId}/runs", jsonBody: body, ct: ct).ConfigureAwait(false);
         return FlowRun.FromApi(created);
+    }
+
+    /// <summary>
+    /// Stage one sealed copy of a connection source for a run start → its <c>file</c>.
+    /// <c>POST /api/company-data/flows/{flowId}/run-files</c> with <c>{value}</c>:
+    /// <paramref name="sealedValue"/> is the source's envelope JSON sealed to ONE bound user (the
+    /// <see cref="Node"/> <see cref="Crypto.EncryptForPublicKey"/> returns, or its JSON string). Name
+    /// the returned file in <see cref="TriggerFlowRunAsync(string, string, IReadOnlyDictionary{string, string}, IReadOnlyList{FlowRunSourceFile}?, CancellationToken)"/>'s
+    /// <c>sourceFiles</c>. An over-budget value is refused <c>documents.too_large</c>.
+    /// </summary>
+    public async Task<string> StageRunFileAsync(string flowId, object sealedValue, CancellationToken ct = default)
+    {
+        var body = await _http.PostAsync($"{FlowsPath}/{flowId}/run-files",
+            jsonBody: new Dictionary<string, object?> { ["value"] = FlowSources.SealedString(sealedValue) },
+            ct: ct).ConfigureAwait(false);
+        return FlowSources.ResponseFile(body);
+    }
+
+    /// <summary>
+    /// Upload one bound party's copy of a binary answer on the company's turn → its <c>file</c>.
+    /// <c>POST /api/company-data/flow-runs/{runId}/answer-files</c> with
+    /// <c>{slug, for_user_id, value}</c>: <paramref name="slug"/> a binary field of the current step,
+    /// <paramref name="forUserId"/> a bound party, <paramref name="sealedValue"/> the file's envelope
+    /// JSON sealed to that party's key (a wrapper <see cref="Node"/> or its JSON string). Upload one
+    /// copy per bound party, then submit <c>{"_enc_file": file}</c> as each party's answer value.
+    /// </summary>
+    public async Task<string> UploadAnswerFileAsync(
+        string runId, string slug, string forUserId, object sealedValue, CancellationToken ct = default)
+    {
+        var body = await _http.PostAsync($"{FlowRunsPath}/{runId}/answer-files",
+            jsonBody: new Dictionary<string, object?>
+            {
+                ["slug"] = slug,
+                ["for_user_id"] = forUserId,
+                ["value"] = FlowSources.SealedString(sealedValue),
+            }, ct: ct).ConfigureAwait(false);
+        return FlowSources.ResponseFile(body);
+    }
+
+    /// <summary>
+    /// The company's own copy of a run's connection source, as stored — the sealed wrapper.
+    /// <c>GET /api/company-data/flow-runs/{runId}/source-files/{sourceKey}</c> (the key, e.g.
+    /// <c>conn:customer:passport</c>, is URL-encoded). The wrapper opens with the service key; its
+    /// plaintext is the file's envelope JSON. <see cref="FlowRun.SourceFiles"/> lists the run's keys.
+    /// </summary>
+    public async Task<Node> FlowRunSourceFileAsync(string runId, string sourceKey, CancellationToken ct = default)
+    {
+        var res = await BinaryFetchImpl(
+            $"{FlowRunsPath}/{runId}/source-files/{Uri.EscapeDataString(sourceKey)}", ct).ConfigureAwait(false);
+        return res.Wrapper as Node ?? throw new DecryptException($"no sealed copy of {sourceKey} was served");
     }
 
     /// <summary>
@@ -1157,7 +1230,7 @@ public sealed class Client : IDisposable
 
     /// <summary>
     /// This client's OWN identity from <c>GET /api/company-data/whoami</c>. The COMPANY
-    /// party of a <see cref="TriggerFlowRunAsync"/> binding must bind to <c>CompanyUserId</c> (the
+    /// party of a <see cref="TriggerFlowRunAsync(string, string, IReadOnlyDictionary{string, string}, CancellationToken)"/> binding must bind to <c>CompanyUserId</c> (the
     /// person party's user_id comes from the connection), so without this the company-side binding
     /// was unconstructible through the SDK.
     /// </summary>
@@ -1196,7 +1269,12 @@ public sealed class Client : IDisposable
             if (row.Get("for_user_id").AsString() != serviceUid) continue;
             var slug = row.Get("slug").AsString();
             if (string.IsNullOrEmpty(slug) || !row.Has("value")) continue;
-            outMap[slug!] = DecryptValueImpl(row.Get("value"));
+            // A file answer is a plaintext {"_enc_file": …} reference, not a wrapper; it stands in
+            // the map as that reference, which reads as answered.
+            var value = row.Get("value");
+            outMap[slug!] = FlowSources.FileRef(value) is not null
+                ? FlowSources.FileRefMarker(value)
+                : DecryptValueImpl(value);
         }
         return outMap;
     }
@@ -1364,15 +1442,40 @@ public sealed class Client : IDisposable
 
     /// <summary>
     /// Document-mode company leaf: one-time-key value gather → POST /generate. Seals the company's
-    /// decrypted answers with the one-time-key bundle and POSTs {otk, values}. Returns the API response
+    /// decrypted answers with the one-time-key bundle and POSTs {otk, values, inputs}. Before that,
+    /// every participant PDF source the current leaf's rules name that the run HOLDS for the company —
+    /// a <c>source_field</c> whose own answer is a file, a <c>source_connection</c> in
+    /// <see cref="FlowRun.SourceFiles"/> — is fetched (<c>slots/{slug}/file</c> resp.
+    /// <c>source-files/{key}</c>), decrypted with the service key, sealed under the same one-time key
+    /// and uploaded to <c>/generate/inputs</c>; <c>inputs</c> names them. Returns the API response
     /// Node {documents, status} — documents is one {output_key, party_key, document_id, position} per
     /// produced (output document, participant), position the step's 1-based place in the run's signing
     /// line or null for an unlisted party (idempotent — a repeat answers the same set).
+    /// <c>flows.source_pdf_invalid</c> refuses a source that is not a usable PDF (the run stays
+    /// <c>generating</c>).
     /// </summary>
     public async Task<Node> GenerateFlowDocumentAsync(FlowRun run, CancellationToken ct = default)
     {
-        var body = Crypto.OneTimeKeyBundle(DecryptRunAnswers(run));
-        return await _http.PostAsync($"{FlowRunsPath}/{run.Id}/generate", jsonBody: body, ct: ct).ConfigureAwait(false);
+        var held = FlowSources.Held(run.Definition, run.CurrentNode, run.Answers, run.ServiceUserId, run.SourceFiles);
+        return await FlowSources.GenerateWithInputsAsync(
+            _http, $"{FlowRunsPath}/{run.Id}/generate", DecryptRunAnswers(run), held,
+            (src, c) => OwnSourceEnvelopeAsync(run.Id!, src, c), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>The company's own copy of one held source, decrypted to its envelope JSON.</summary>
+    private async Task<string> OwnSourceEnvelopeAsync(string runId, HeldSource src, CancellationToken ct)
+    {
+        Node wrapper;
+        if (src.Kind == "field")
+        {
+            var res = await BinaryFetchImpl($"{FlowRunsPath}/{runId}/slots/{src.Slug}/file", ct).ConfigureAwait(false);
+            wrapper = res.Wrapper as Node ?? throw new DecryptException($"no sealed copy of {src.SourceKey} was served");
+        }
+        else
+        {
+            wrapper = await FlowRunSourceFileAsync(runId, src.SourceKey, ct).ConfigureAwait(false);
+        }
+        return DecryptValueImpl(wrapper);
     }
 
     /// <summary>

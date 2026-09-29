@@ -145,7 +145,7 @@ finds the run by it.
 | Resolve + bind the customer party | `Client.ConnectionsAsync()`, matched by the configured share code → `Connection.PersonId` |
 | Trigger the run | `Client.TriggerFlowRunAsync(flowId, connectionId, bindings)` |
 | Each poll — read the run | `Client.FlowRunAsync(flowRunId)` |
-| Drive one company step | `Client.ProcessFlowRunAsync(flowRunId, fillNode)` (a rejected value throws `ValidationException`) |
+| Drive one company step | `Client.ProcessFlowRunAsync(flowRunId, fillNode)` (a rejected value throws `ValidationException`; at a document leaf it uploads the run's held source PDFs as generation inputs before generating) |
 | On completion — answers | `Client.FlowRunAnswers(run)` (decrypted `{slug: value}`) |
 | On completion — documents | `Client.FlowRunDocumentAsync(flowRunId, outputKey)` for each output document in the company participant's `Documents` (contract fixture only) |
 
@@ -162,7 +162,9 @@ waits. The demo ships two importable flow packages in **`flow/fixtures/`**:
 
 A document leaf can produce several named **output documents** (e.g. "Contract" and "Addendum").
 Generation answers `{documents: [{output_key, party_key, document_id, position}], status}` — one entry
-per produced (output document, participant). On completion the handler downloads the company's own
+per produced (output document, participant). When a rule's PDF comes from a participant (a flow
+field's PDF, or a PDF a customer shared on its connection), `ProcessFlowRunAsync` uploads the company's
+own copy of every held source before generating — the handler needs no code of its own for it. On completion the handler downloads the company's own
 copy of EACH output and reports them as `documents: [{output_key, status, downloaded}]`.
 
 ### company-data (the five `companydata:*`)

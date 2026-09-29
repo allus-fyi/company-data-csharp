@@ -230,20 +230,17 @@ public static class Crypto
         }
     }
 
+    /// <summary>A fresh random 32-byte AES-256-GCM key for one <c>/generate</c> call.</summary>
+    internal static byte[] NewOneTimeKey() => RandomNumberGenerator.GetBytes(32);
+
     /// <summary>
-    /// The one-time-key bundle a flow run's <c>/generate</c> takes: the WHOLE answer map, sealed under a
-    /// key used once and never stored. <paramref name="answers"/> is {slug: plaintext} (a non-string
-    /// value is JSON-encoded). A random 32-byte AES-256-GCM key encrypts JSON(answers); the result is
-    /// packed iv(12)||ciphertext||tag(16) and both halves are base64-encoded → {otk, values}. The server
-    /// evaluates every leaf-PDF condition, constant and {{tag}} over this map, so a slug missing from it
-    /// prints blank on the contract.
+    /// Seal <paramref name="plaintext"/> under a one-time key → <c>base64(iv(12)||ciphertext||tag(16))</c>,
+    /// the layout of a bundle's <c>values</c>. A generation input (a held source PDF's envelope) is
+    /// sealed the same way under the same key as the call's <c>values</c>, with its own fresh iv.
     /// </summary>
-    internal static Dictionary<string, object?> OneTimeKeyBundle(IReadOnlyDictionary<string, object?> answers)
+    internal static string OneTimeKeySeal(byte[] otk, string plaintext)
     {
-        var strMap = answers.ToDictionary(
-            kv => kv.Key, kv => kv.Value is string s ? s : JsonSerializer.Serialize(kv.Value));
-        var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(strMap));
-        var otk = RandomNumberGenerator.GetBytes(32);
+        var payload = Encoding.UTF8.GetBytes(plaintext);
         var iv = RandomNumberGenerator.GetBytes(GcmIvLen);
         var ciphertext = new byte[payload.Length];
         var tag = new byte[GcmTagLen];
@@ -253,10 +250,28 @@ public static class Crypto
         Buffer.BlockCopy(iv, 0, blob, 0, GcmIvLen);
         Buffer.BlockCopy(ciphertext, 0, blob, GcmIvLen, ciphertext.Length);
         Buffer.BlockCopy(tag, 0, blob, GcmIvLen + ciphertext.Length, GcmTagLen);
+        return Convert.ToBase64String(blob);
+    }
+
+    /// <summary>
+    /// The one-time-key bundle a flow run's <c>/generate</c> takes: the WHOLE answer map, sealed under a
+    /// key used once and never stored. <paramref name="answers"/> is {slug: plaintext} (a non-string
+    /// value is JSON-encoded). A random 32-byte AES-256-GCM key (or <paramref name="otk"/>, when the
+    /// call's generation inputs were sealed under it) encrypts JSON(answers); the result is packed
+    /// iv(12)||ciphertext||tag(16) and both halves are base64-encoded → {otk, values}. The server
+    /// evaluates every leaf-PDF condition, constant and {{tag}} over this map, so a slug missing from it
+    /// prints blank on the contract.
+    /// </summary>
+    internal static Dictionary<string, object?> OneTimeKeyBundle(
+        IReadOnlyDictionary<string, object?> answers, byte[]? otk = null)
+    {
+        var strMap = answers.ToDictionary(
+            kv => kv.Key, kv => kv.Value is string s ? s : JsonSerializer.Serialize(kv.Value));
+        var key = otk ?? NewOneTimeKey();
         return new Dictionary<string, object?>
         {
-            ["otk"] = Convert.ToBase64String(otk),
-            ["values"] = Convert.ToBase64String(blob),
+            ["otk"] = Convert.ToBase64String(key),
+            ["values"] = OneTimeKeySeal(key, JsonSerializer.Serialize(strMap)),
         };
     }
 

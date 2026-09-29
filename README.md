@@ -830,6 +830,50 @@ copy holds the whole run and no service key is involved. Returns `{documents, st
 answers the same set. Throws `ConfigException` when the run's current step is not
 bound to your company.
 
+**Participant PDF sources — generation uploads the held source PDFs itself.** A leaf output rule's PDF
+is a company template (`asset_key`), a flow field's answer (`source_field` → source key
+`field:<slug>`, a `pdf_document` field) or what a customer bound to a party shared on its connection
+(`source_connection: {party, request_slug}` → `conn:<party>:<request_slug>`). A rule whose source the
+run does not hold does not match, and the next rule is tried. Both `GenerateFlowDocumentAsync`
+overloads — and `ProcessFlowRunAsync`, which chains the service one at a document leaf — compute the
+held set of the current leaf (a `field:` source whose OWN answer copy is a file reference, a `conn:`
+source named in `FlowRun.SourceFiles`), fetch the own copy of each (service `Client`:
+`slots/{slug}/file` resp. `source-files/{key}`; `CustomerClient`: its `answer-files/{file}`), decrypt it
+with the key that opens the own copies (service key resp. account key), seal the envelope under the SAME
+one-time key as `values` and POST it to `…/generate/inputs` → `{input}`, then generate with
+`inputs: [{source_key, input}]` (`[]` when nothing is held). `400 flows.generate_inputs_mismatch` means
+the inputs were not exactly the held set; `400 flows.source_pdf_invalid` means a source is not a usable
+PDF (the run stays `generating`).
+
+A file answer is the plaintext reference `{"_enc_file": file}` (a linked file's frozen copy adds
+`"_link": 1`); `FlowRunAnswers` and the answer maps the SDK builds carry it as that marker string, which
+reads as answered.
+
+```csharp
+Task<FlowRun> TriggerFlowRunAsync(string flowId, string connectionId, IReadOnlyDictionary<string, string> bindings,
+    IReadOnlyList<FlowRunSourceFile>? sourceFiles, CancellationToken ct = default)          // + source_files on create
+Task<string> StageRunFileAsync(string flowId, object sealedValue, CancellationToken ct = default)          // POST /api/company-data/flows/{flowId}/run-files → file
+Task<string> UploadAnswerFileAsync(string runId, string slug, string forUserId, object sealedValue,
+    CancellationToken ct = default)                                                         // POST /api/company-data/flow-runs/{runId}/answer-files → file
+Task<Node> FlowRunSourceFileAsync(string runId, string sourceKey, CancellationToken ct = default)          // GET …/flow-runs/{runId}/source-files/{sourceKey} → the sealed wrapper
+```
+
+* **Connection sources are copied at run start.** For every answered `conn:` source a rule of the
+  flow's latest published version names, stage one copy per DISTINCT bound user with
+  `StageRunFileAsync` (the source's envelope JSON sealed to that user: the service key for your own
+  company, the person's public key, a company customer's account key — `sealedValue` is the `Node`
+  `Crypto.EncryptForPublicKey` returns, or its JSON string), then pass
+  `new FlowRunSourceFile(sourceKey, forUserId, file)` entries to `TriggerFlowRunAsync`. A start whose
+  list is not exactly that set throws `ApiException` `flows.source_files_invalid`; its `Details` carry
+  `missing` (`[{source_key, for_user_id}]`) and `unexpected` (`[file]`), and nothing is written. An
+  over-budget staged value is `documents.too_large`.
+* `FlowRun.SourceFiles` is `{source_key: file}` — your own copies of the run's connection sources
+  (empty when none). `FlowRunSourceFileAsync(runId, sourceKey)` returns your copy as stored (the
+  sealed wrapper; the key is URL-encoded for you).
+* **A binary field on your own turn**: `UploadAnswerFileAsync(runId, slug, forUserId, sealedValue)`
+  uploads one bound party's sealed copy (one per bound party) and returns its `file`; submit
+  `{"_enc_file": file}` as each party's answer value.
+
 ### Plugin fields on the company's step
 
 `PluginPassAsync`, `PluginOptionsAsync`, `PluginOutputsAsync` and `CheckFlowValue` call a plugin

@@ -757,6 +757,13 @@ public sealed record FlowRun(
     /// </summary>
     public IReadOnlyList<string>? PrivateSlugs { get; init; }
 
+    /// <summary>
+    /// The viewer's own copies of the run's connection sources, <c>{source_key: file}</c> — the
+    /// owning company's on the service <see cref="Client"/>, the customer's own on
+    /// <see cref="CustomerClient"/>. Empty when the run holds none.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> SourceFiles { get; init; } = new Dictionary<string, string>();
+
     /// <summary>The party key the company is bound to (Bindings[key] == CompanyUserId).</summary>
     public string? CompanyPartyKey
     {
@@ -823,9 +830,21 @@ public sealed record FlowRun(
             PrivateSlugs = obj.Get("private_slugs").Kind == NodeKind.List
                 ? obj.Get("private_slugs").AsList().Select(n => n.AsString()).Where(v => !string.IsNullOrEmpty(v)).Select(v => v!).ToList()
                 : null,
+            SourceFiles = obj.Get("source_files").Kind == NodeKind.Object
+                ? obj.Get("source_files").AsObject()
+                    .Where(kv => kv.Value.RawScalar is string f && f.Length > 0)
+                    .ToDictionary(kv => kv.Key, kv => (string)kv.Value.RawScalar!)
+                : new Dictionary<string, string>(),
         };
     }
 }
+
+/// <summary>
+/// One staged copy of a connection source named at run start: <see cref="SourceKey"/>
+/// (<c>conn:&lt;party&gt;:&lt;request_slug&gt;</c>), the bound user it is sealed for, and the
+/// <see cref="File"/> <see cref="Client.StageRunFileAsync"/> returned.
+/// </summary>
+public sealed record FlowRunSourceFile(string SourceKey, string ForUserId, string File);
 
 /// <summary>
 /// One of a participant's own documents on a run — one per output document the leaf produced for
