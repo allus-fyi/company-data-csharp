@@ -295,6 +295,7 @@ public sealed class CustomerClient
         return (await _http.PostAsync($"{Conn}/{connectionId}/flow-runs/{runId}/answers", jsonBody: payload, ct: ct).ConfigureAwait(false)).ToObjectGraph();
     }
 
+    /// <summary>Declines a flow run, cancelling it for every party. Accepted only on your own turn: your answer turn or your own open signing step. Any other time the API refuses it with error_key flows.not_your_turn (403).</summary>
     public async Task<object?> DeclineFlowRunAsync(string connectionId, string runId, System.Threading.CancellationToken ct = default)
         => (await _http.PostAsync($"{Conn}/{connectionId}/flow-runs/{runId}/decline", jsonBody: null, ct: ct).ConfigureAwait(false)).ToObjectGraph();
 
