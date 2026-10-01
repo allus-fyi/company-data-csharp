@@ -869,7 +869,8 @@ public sealed record FlowRun(
 /// <summary>
 /// One staged copy of a connection source named at run start: <see cref="SourceKey"/>
 /// (<c>conn:&lt;party&gt;:&lt;request_slug&gt;</c>), the bound user it is sealed for, and the
-/// <see cref="File"/> <see cref="Client.StageRunFileAsync"/> returned.
+/// <see cref="File"/> <see cref="Client.StageRunFileAsync"/> returned for the customer bound to the
+/// source's party.
 /// </summary>
 public sealed record FlowRunSourceFile(string SourceKey, string ForUserId, string File);
 

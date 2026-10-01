@@ -1119,8 +1119,9 @@ public sealed class Client : IDisposable
     /// version names, per distinct bound user — the company's own copy sealed to the service key. A
     /// start whose list is not exactly that set is refused with <see cref="ApiException"/>
     /// <c>flows.source_files_invalid</c>, whose <see cref="ApiException.Details"/> carry
-    /// <c>missing</c> (<c>[{source_key, for_user_id}]</c>) and <c>unexpected</c> (<c>[file]</c>);
-    /// nothing is written.</para>
+    /// <c>missing</c> (<c>[{source_key, for_user_id, source_user_id}]</c> — <c>source_user_id</c> the
+    /// customer bound to the source's party, whose shared file each copy is) and <c>unexpected</c>
+    /// (<c>[file]</c>); nothing is written.</para>
     /// <para>
     /// Reads the flow's latest published version (<see cref="PublishedFlowAsync"/>) and pins it with
     /// <c>flow_version</c>. When that version's text elements show the connected customer's shared
@@ -1251,16 +1252,25 @@ public sealed class Client : IDisposable
 
     /// <summary>
     /// Stage one sealed copy of a connection source for a run start → its <c>file</c>.
-    /// <c>POST /api/company-data/flows/{flowId}/run-files</c> with <c>{value}</c>:
+    /// <c>POST /api/company-data/flows/{flowId}/run-files</c> with <c>{source_user_id, value}</c>:
+    /// <paramref name="sourceUserId"/> is the connected customer whose shared PDF this copies (the
+    /// <c>source_user_id</c> a refused start's <c>missing</c> entry names — the user bound to the
+    /// source's party); the copy is stored in that customer's home region.
     /// <paramref name="sealedValue"/> is the source's envelope JSON sealed to ONE bound user (the
     /// <see cref="Node"/> <see cref="Crypto.EncryptForPublicKey"/> returns, or its JSON string). Name
     /// the returned file in <see cref="TriggerFlowRunAsync(string, string, IReadOnlyDictionary{string, string}, IReadOnlyList{FlowRunSourceFile}?, CancellationToken)"/>'s
-    /// <c>sourceFiles</c>. An over-budget value is refused <c>documents.too_large</c>.
+    /// <c>sourceFiles</c>; the start accepts it only for a source whose party is bound to
+    /// <paramref name="sourceUserId"/>. A customer that is not connected to the service is refused
+    /// <c>flows.source_user_invalid</c>, an over-budget value <c>documents.too_large</c>.
     /// </summary>
-    public async Task<string> StageRunFileAsync(string flowId, object sealedValue, CancellationToken ct = default)
+    public async Task<string> StageRunFileAsync(string flowId, string sourceUserId, object sealedValue, CancellationToken ct = default)
     {
         var body = await _http.PostAsync($"{FlowsPath}/{flowId}/run-files",
-            jsonBody: new Dictionary<string, object?> { ["value"] = FlowSources.SealedString(sealedValue) },
+            jsonBody: new Dictionary<string, object?>
+            {
+                ["source_user_id"] = sourceUserId,
+                ["value"] = FlowSources.SealedString(sealedValue),
+            },
             ct: ct).ConfigureAwait(false);
         return FlowSources.ResponseFile(body);
     }

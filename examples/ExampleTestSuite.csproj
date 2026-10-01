@@ -50,7 +50,7 @@
          before); everywhere else the matching released package is. -->
     <ProjectReference Include="../src/Allus.CompanyData/Allus.CompanyData.csproj"
                       Condition="Exists('../src/Allus.CompanyData/Allus.CompanyData.csproj')" />
-    <PackageReference Include="Allus.CompanyData" Version="0.0.13"
+    <PackageReference Include="Allus.CompanyData" Version="0.1.0"
                       Condition="!Exists('../src/Allus.CompanyData/Allus.CompanyData.csproj')" />
   </ItemGroup>
 

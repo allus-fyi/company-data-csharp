@@ -853,7 +853,8 @@ reads as answered.
 ```csharp
 Task<FlowRun> TriggerFlowRunAsync(string flowId, string connectionId, IReadOnlyDictionary<string, string> bindings,
     IReadOnlyList<FlowRunSourceFile>? sourceFiles, CancellationToken ct = default)          // + source_files on create
-Task<string> StageRunFileAsync(string flowId, object sealedValue, CancellationToken ct = default)          // POST /api/company-data/flows/{flowId}/run-files → file
+Task<string> StageRunFileAsync(string flowId, string sourceUserId, object sealedValue,
+    CancellationToken ct = default)                                                         // POST /api/company-data/flows/{flowId}/run-files → file
 Task<string> UploadAnswerFileAsync(string runId, string slug, string forUserId, object sealedValue,
     CancellationToken ct = default)                                                         // POST /api/company-data/flow-runs/{runId}/answer-files → file
 Task<Node> FlowRunSourceFileAsync(string runId, string sourceKey, CancellationToken ct = default)          // GET …/flow-runs/{runId}/source-files/{sourceKey} → the sealed wrapper
@@ -861,12 +862,16 @@ Task<Node> FlowRunSourceFileAsync(string runId, string sourceKey, CancellationTo
 
 * **Connection sources are copied at run start.** For every answered `conn:` source a rule of the
   flow's latest published version names, stage one copy per DISTINCT bound user with
-  `StageRunFileAsync` (the source's envelope JSON sealed to that user: the service key for your own
-  company, the person's public key, a company customer's account key — `sealedValue` is the `Node`
-  `Crypto.EncryptForPublicKey` returns, or its JSON string), then pass
-  `new FlowRunSourceFile(sourceKey, forUserId, file)` entries to `TriggerFlowRunAsync`. A start whose
-  list is not exactly that set throws `ApiException` `flows.source_files_invalid`; its `Details` carry
-  `missing` (`[{source_key, for_user_id}]`) and `unexpected` (`[file]`), and nothing is written. An
+  `StageRunFileAsync(flowId, sourceUserId, sealedValue)` — `sourceUserId` the customer bound to the
+  source's party, whose shared PDF the copy is (the copy is stored in that customer's home region);
+  `sealedValue` the source's envelope JSON sealed to that user: the service key for your own company,
+  the person's public key, a company customer's account key — the `Node` `Crypto.EncryptForPublicKey`
+  returns, or its JSON string — then pass `new FlowRunSourceFile(sourceKey, forUserId, file)` entries to
+  `TriggerFlowRunAsync`. A start whose list is not exactly that set, or whose copy was staged for
+  another customer than the one bound to its source's party, throws `ApiException`
+  `flows.source_files_invalid`; its `Details` carry `missing`
+  (`[{source_key, for_user_id, source_user_id}]`) and `unexpected` (`[file]`), and nothing is written.
+  Staging for a customer that is not connected to the service is `flows.source_user_invalid`; an
   over-budget staged value is `documents.too_large`.
 * `FlowRun.SourceFiles` is `{source_key: file}` — your own copies of the run's connection sources
   (empty when none). `FlowRunSourceFileAsync(runId, sourceKey)` returns your copy as stored (the
