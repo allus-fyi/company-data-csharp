@@ -44,6 +44,10 @@ public class AuthException : Exception
 /// <c>Retry-After</c> is 30 seconds. Any call that is not a GET, the change-feed drains and
 /// <c>OAuthClient.PollResultAsync</c> can throw it; the token request cannot. The SDK does not
 /// retry it.</para>
+/// <para>A 503 <c>platform.out_of_order</c> means the region serving the call is being rebuilt.
+/// The request was not processed, so the call is safe to repeat; the response's
+/// <c>Retry-After</c> is 300 seconds. Any call can throw it, reads and the change-feed drains
+/// included, except the <c>client_credentials</c> token request. The SDK does not retry it.</para>
 /// </summary>
 public class ApiException : Exception
 {

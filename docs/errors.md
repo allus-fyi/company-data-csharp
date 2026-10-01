@@ -78,6 +78,43 @@ catch (ApiException e) when (e.Status == 503 && e.ErrorKey == "db.writes_paused"
 }
 ```
 
+## 503 `platform.out_of_order` — the platform is out of order, retry
+
+While the region serving a call is being rebuilt, the call answers **503** with
+`ErrorKey` **`platform.out_of_order`** (`"allme is temporarily out of order.
+Please try again later."`) and the header `Retry-After: 300`. **The request was
+not processed**, so the call is safe to repeat exactly as it was. The platform
+answers normally again once the region is back in service.
+
+It surfaces as a plain `ApiException` (`Status == 503`, `ErrorKey ==
+"platform.out_of_order"`); the SDK does not retry it. `ApiException` does not
+carry the `Retry-After` header: wait 300 seconds, then repeat the same call.
+
+Where it can come from:
+
+* every company-data and customer call, reads included — connections, request
+  fields, binary fetches, documents, flow runs, consent answers, connect requests,
+  messages, 2FA challenges and results, `/api/keys`;
+* the change-feed drains `GET /api/company-data/changes` and
+  `GET /api/customer/changes` (`ProcessChangesAsync`, `DrainBatchAsync`): nothing
+  was drained, the events stay queued on the server and arrive on a later run, and
+  the local buffer is untouched;
+* every `OAuthClient` call — `ExchangeCodeAsync`, `UserinfoAsync`,
+  `PollResultAsync` (the result is not consumed; poll again).
+
+The `client_credentials` token request (`POST /oauth2/token`) the service and
+customer clients make does not answer it, so the SDK still holds a token and the
+503 arrives on the call itself. Every other grant at `POST /oauth2/token` — the
+`OAuthClient` code exchange, a refresh-token grant — answers it.
+
+```csharp
+catch (ApiException e) when (e.Status == 503 && e.ErrorKey == "platform.out_of_order")
+{
+    await Task.Delay(TimeSpan.FromSeconds(300));
+    // repeat the same call
+}
+```
+
 ## `RateLimitException`
 
 ```csharp
