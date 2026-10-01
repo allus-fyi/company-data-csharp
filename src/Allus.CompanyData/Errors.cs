@@ -39,6 +39,11 @@ public class AuthException : Exception
 /// Any non-2xx from the API. Carries the HTTP <see cref="Status"/>, the platform
 /// <see cref="ErrorKey"/> (when the body provided one), a human-readable message, and the error
 /// body's remaining fields as <see cref="Details"/>.
+/// <para>A 503 <c>db.writes_paused</c> means saving is paused (the platform cannot complete a save
+/// in every region). Nothing was written, so the call is safe to repeat; the response's
+/// <c>Retry-After</c> is 30 seconds. Any call that is not a GET, the change-feed drains and
+/// <c>OAuthClient.PollResultAsync</c> can throw it; the token request cannot. The SDK does not
+/// retry it.</para>
 /// </summary>
 public class ApiException : Exception
 {

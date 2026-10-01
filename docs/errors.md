@@ -44,6 +44,40 @@ catch (ApiException e) when (e.ErrorKey == "company_data.file_expired")
 
 A **421 `region.rebase_required`** never reaches you when the platform is reachable: it is the global front door telling the SDK to send the call to the caller's home region, which the SDK does automatically (README, **How it's wired** → Regions). It surfaces as `ApiException` in exactly three cases: the refusal's base is absent, not a string, or empty (nothing to rebase to); the refusal names the SDK's own current base (a self-referential directive, so rebasing would loop); or a rebase already happened once for this request and a second 421 still comes back. In every other case the SDK rebases and retries transparently.
 
+## 503 `db.writes_paused` — saving is paused, retry
+
+While the platform cannot complete a save in every region, a call can answer
+**503** with `ErrorKey` **`db.writes_paused`** (`"Saving data is not possible
+right now"`) and the header `Retry-After: 30`. **Nothing was written**, so the call
+is safe to repeat exactly as it was. Reads keep working.
+
+It surfaces as a plain `ApiException` (`Status == 503`, `ErrorKey ==
+"db.writes_paused"`); the SDK does not retry it. `ApiException` does not carry the
+`Retry-After` header: wait 30 seconds, then repeat the same call.
+
+Where it can come from:
+
+* every company-data and customer call that is not a GET — creating, updating or
+  deleting documents, flow-run starts, answers, uploads and generation, consent
+  answers, connect requests, messages, 2FA challenges, `/api/keys/batch`;
+* the change-feed drains `GET /api/company-data/changes` and
+  `GET /api/customer/changes` (`ProcessChangesAsync`, `DrainBatchAsync`): nothing
+  was drained, the events stay queued on the server and arrive on a later run, and
+  the local buffer is untouched;
+* `OAuthClient.PollResultAsync` (`POST /oauth2/result`): the result is not
+  consumed; poll again.
+
+The token request (`POST /oauth2/token`) does not answer it: token grants keep
+working while saving is paused.
+
+```csharp
+catch (ApiException e) when (e.Status == 503 && e.ErrorKey == "db.writes_paused")
+{
+    await Task.Delay(TimeSpan.FromSeconds(30));
+    // repeat the same call
+}
+```
+
 ## `RateLimitException`
 
 ```csharp

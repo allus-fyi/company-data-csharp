@@ -1270,6 +1270,14 @@ catch (RateLimitException e) { await Task.Delay(TimeSpan.FromSeconds(e.RetryAfte
 catch (ApiException e) { Log(e.Status, e.ErrorKey, e.Message); }
 ```
 
+**503 `db.writes_paused` — saving is paused, retry.** While the platform cannot
+complete a save in every region, any call that is not a GET, the change-feed
+drains (`ProcessChangesAsync`, `DrainBatchAsync`) and `OAuthClient.PollResultAsync`
+can throw `ApiException` with `Status` 503 and `ErrorKey` `db.writes_paused`, sent
+with `Retry-After: 30`. Nothing was written (a drain drained nothing), so wait 30
+seconds and repeat the same call; the SDK does not retry it. Reads and token
+requests keep working.
+
 See [`docs/errors.md`](docs/errors.md).
 
 ---
