@@ -60,11 +60,15 @@ public interface IHttpTransport
 /// <summary>Default <see cref="IHttpTransport"/> over <see cref="System.Net.Http.HttpClient"/>.</summary>
 public sealed class HttpTransport : IHttpTransport
 {
+    /// <summary>How long one request of the client this transport creates waits for the platform's answer.</summary>
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(45);
+
     private readonly System.Net.Http.HttpClient _http;
 
+    /// <param name="http">A client passed in keeps its own timeout; the one created here waits 45 seconds.</param>
     public HttpTransport(System.Net.Http.HttpClient? http = null)
     {
-        _http = http ?? new System.Net.Http.HttpClient();
+        _http = http ?? new System.Net.Http.HttpClient { Timeout = RequestTimeout };
     }
 
     public async Task<HttpResult> PostFormAsync(
@@ -113,24 +117,35 @@ public sealed class HttpTransport : IHttpTransport
         return await SendAsync(req, ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// One exchange. A timeout of the send or of the body read fails as a dropped connection does there,
+    /// with <see cref="HttpRequestException"/>; a cancellation the caller asked for passes unchanged.
+    /// </summary>
     private async Task<HttpResult> SendAsync(HttpRequestMessage req, CancellationToken ct)
     {
-        using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
-        // Read the bytes ONCE — BodyBytes is the byte-safe original (a broadcast document's plaintext
-        // file may not be valid UTF-8); Body is the best-effort text decode every JSON/XML/error-message
-        // path already assumes.
-        var bytes = await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-        var body = bytes.Length == 0 ? string.Empty : System.Text.Encoding.UTF8.GetString(bytes);
-        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var h in resp.Headers) headers[h.Key] = string.Join(",", h.Value);
-        foreach (var h in resp.Content.Headers) headers[h.Key] = string.Join(",", h.Value);
-        return new HttpResult
+        try
         {
-            StatusCode = (int)resp.StatusCode,
-            Body = body,
-            BodyBytes = bytes,
-            Headers = headers,
-        };
+            using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
+            // Read the bytes ONCE — BodyBytes is the byte-safe original (a broadcast document's plaintext
+            // file may not be valid UTF-8); Body is the best-effort text decode every JSON/XML/error-message
+            // path already assumes.
+            var bytes = await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+            var body = bytes.Length == 0 ? string.Empty : System.Text.Encoding.UTF8.GetString(bytes);
+            var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var h in resp.Headers) headers[h.Key] = string.Join(",", h.Value);
+            foreach (var h in resp.Content.Headers) headers[h.Key] = string.Join(",", h.Value);
+            return new HttpResult
+            {
+                StatusCode = (int)resp.StatusCode,
+                Body = body,
+                BodyBytes = bytes,
+                Headers = headers,
+            };
+        }
+        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            throw new HttpRequestException("the request timed out", ex);
+        }
     }
 
     private static void ApplyHeaders(HttpRequestMessage req, IReadOnlyDictionary<string, string> headers)
