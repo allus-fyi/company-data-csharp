@@ -314,6 +314,8 @@ public static class Crypto
             }
             case JsonElement el:
             {
+                if (el.ValueKind == JsonValueKind.String && el.GetString() is string elJson)
+                    return ExtractWrapperFields(elJson); // a wrapper serialized as a JSON string
                 if (el.ValueKind != JsonValueKind.Object)
                     throw new DecryptException("wrapper must be a JSON object");
                 string? Get(string name)

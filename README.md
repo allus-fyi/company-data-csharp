@@ -1410,6 +1410,8 @@ explicit null — and a value below 1 raises `ConfigException` at the call.
 The sign-in result carries `values`, `ValuesCipher` **and** `attestations`.
 * `sub` **is** the person's share code and equals `share_code` — byte-identical to the id_token's `sub`.
   `display_name` is gone: ask for a `name` claim and read the value under that key.
+* A claim value's wrapper and an attestation's seal reach `userinfo` as a wrapper object or as its JSON string
+  (the web consent screen sends the string); `Crypto.Decrypt` opens both.
 * `ValuesCipher` is an additive sibling of `Values`, keyed the same way: the raw app-key ciphertext
   wrapper each plaintext value was decrypted from, exactly as `userinfo` delivered it. Lets you show that a
   value really came from encrypted delivery rather than trusting it verbatim. Empty for a mode/claim that
