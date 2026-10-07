@@ -73,8 +73,8 @@ public sealed class CompanyDataHandlers
     private const string CallRequestFields = "Client.RequestFieldsAsync — GET /api/company-data/request-fields: your own request-field catalog, fetched once and cached for the life of the client";
     private const string CallProcessChanges = "Client.ProcessChangesAsync — drains the change feed through the crash-safe pump: handler before ack, at-least-once (dedup on Change.id), failures to the local dead-letter store";
     private const string CallCreateDocument = "Client.CreateDocumentAsync — {0}";
-    private const string CallListDocuments = "Client.ListDocumentsAsync — GET /api/company-data/documents: pages the service's documents so cleanup finds everything it created";
-    private const string CallDeleteDocument = "Client.DeleteDocumentAsync — DELETE /api/company-data/documents/{0}";
+    private const string CallDeleteDocument = "Client.DeleteDocumentAsync — DELETE /api/company-data/documents/{0}: one document this example created";
+    private const string CallEndDocument = "Client.UpdateDocumentStatusAsync — PUT /api/company-data/documents/{0}: status ended, because the platform refuses to delete a contract that carries a signature";
     private const string CallWebhookStarted = "(webhook run started) — POST /webhook receives each delivery; every poll also drains the change feed as a fallback";
     private const string CallVerifyWebhook = "Client.VerifyWebhook — checks the delivery's X-Allus-Signature HMAC against the secret configured for its X-Allus-Webhook-Id; a failure answers 401";
     private const string CallParseWebhook = "Client.ParseWebhook — turns the verified body into a typed Change, decrypting its value with the service key";
@@ -131,6 +131,10 @@ public sealed class CompanyDataHandlers
         if (id == Documents)
         {
             meta["share_code"] = Web.Str(body, "shareCode") ?? ""; // the per-person/contract target
+            // The saved service the run and the clean-up act as; the record of created documents is kept
+            // across saves, each entry tagged with the service that created it.
+            meta["client_id"] = Web.Str(body, "clientId") ?? "";
+            meta["created_documents"] = CreatedDocuments();
             // Preserve presence so DoDocuments can distinguish an explicit empty selection from
             // an absent selection; absence means all document types.
             if (Web.Has(body, "documentTypes"))
@@ -329,6 +333,7 @@ public sealed class CompanyDataHandlers
                     "this document type targets a connected person — set a target person share code in the setup, then re-run");
             calls.Add(string.Format(CallCreateDocument, spec.Label));
             var doc = await spec.Create(spec.PerPerson ? shareCode : null);
+            RecordCreatedDocument(doc.Id!);
             docs.Add(new { index = docs.Count + 1, label = spec.Label, document_id = doc.Id, status = doc.Status });
         }
         return new { docs };
@@ -337,10 +342,11 @@ public sealed class CompanyDataHandlers
     // ── POST /api/scenarios/{id}/cleanup (companydata:documents only) ──────────────
 
     /// <summary>
-    /// Delete every document the documents scenario has created on this service, so a reused account
-    /// can reset between runs — companydata:documents is additive (CreateDocumentAsync mints a new
-    /// document each run; nothing deletes a prior run's). Not part of the generic dispatch: called
-    /// directly by the server, the same way Enroll is identity-only.
+    /// Remove the documents the documents scenario created, so a reused account can reset between runs —
+    /// companydata:documents is additive (CreateDocumentAsync mints a new document each run; nothing
+    /// deletes a prior run's). Only the ids this example recorded are touched; a document of the service it
+    /// did not create is never listed or deleted. Not part of the generic dispatch: called directly by the
+    /// server, the same way Enroll is identity-only.
     /// </summary>
     public async Task Cleanup(HttpContext ctx, string id)
     {
@@ -349,22 +355,78 @@ public sealed class CompanyDataHandlers
         await DataRun(ctx, id, DoCleanupDocuments);
     }
 
+    /// <summary>
+    /// Delete each document recorded for the saved service. A contract that carries a signature is refused
+    /// with documents.contract_immutable: it is set to status ended instead and reported in <c>ended</c>,
+    /// and the clean-up goes on. A document already gone (documents.not_found) needs nothing. Each id leaves
+    /// the record as soon as it is dealt with, so a failure part-way leaves only the unprocessed ones.
+    /// Documents recorded for another service stay in the record untouched until that service is saved again.
+    /// </summary>
     private async Task<object> DoCleanupDocuments(Client client, List<string> calls)
     {
         var deleted = 0;
-        while (true)
+        var ended = new List<string>();
+        var clientId = Web.Str(_rt.ReadConfigMeta(Documents), "client_id") ?? "";
+        foreach (var docId in CreatedDocuments().Where(d => d.ClientId == clientId).Select(d => d.Id))
         {
-            calls.Add(CallListDocuments);
-            var page = await client.ListDocumentsAsync(limit: 100, offset: 0);
-            if (page.Count == 0) break;
-            foreach (var doc in page)
+            calls.Add(string.Format(CallDeleteDocument, docId));
+            try
             {
-                calls.Add(string.Format(CallDeleteDocument, doc.Id));
-                await client.DeleteDocumentAsync(doc.Id!);
+                await client.DeleteDocumentAsync(docId);
                 deleted++;
             }
+            catch (ApiException e) when (e.ErrorKey == "documents.contract_immutable")
+            {
+                calls.Add(string.Format(CallEndDocument, docId));
+                await client.UpdateDocumentStatusAsync(docId, "ended");
+                ended.Add(docId);
+            }
+            catch (ApiException e) when (e.ErrorKey == "documents.not_found")
+            {
+                // already removed elsewhere — nothing left to clean up
+            }
+            ForgetCreatedDocument(docId, clientId);
         }
-        return new { deleted };
+        return new { deleted, ended };
+    }
+
+    /// <summary>One document this example created and the saved service that created it.</summary>
+    private sealed record CreatedDocument(string Id, string ClientId);
+
+    /// <summary>The documents this example created, kept in the documents scenario's setup sidecar.</summary>
+    private List<CreatedDocument> CreatedDocuments()
+    {
+        var list = new List<CreatedDocument>();
+        var meta = _rt.ReadConfigMeta(Documents);
+        if (meta.ValueKind == JsonValueKind.Object && meta.TryGetProperty("created_documents", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            foreach (var item in arr.EnumerateArray())
+                list.Add(new CreatedDocument(Web.Str(item, "id") ?? "", Web.Str(item, "client_id") ?? ""));
+        return list;
+    }
+
+    private void RecordCreatedDocument(string docId)
+    {
+        var clientId = Web.Str(_rt.ReadConfigMeta(Documents), "client_id") ?? "";
+        var all = CreatedDocuments();
+        all.Add(new CreatedDocument(docId, clientId));
+        WriteCreatedDocuments(all);
+    }
+
+    private void ForgetCreatedDocument(string docId, string clientId) =>
+        WriteCreatedDocuments(CreatedDocuments().Where(d => !(d.Id == docId && d.ClientId == clientId)).ToList());
+
+    private void WriteCreatedDocuments(List<CreatedDocument> all)
+    {
+        var current = _rt.ReadConfigMeta(Documents);
+        var meta = new Dictionary<string, object?>
+        {
+            ["share_code"] = Web.Str(current, "share_code") ?? "",
+            ["client_id"] = Web.Str(current, "client_id") ?? "",
+            ["created_documents"] = all.Select(d => new Dictionary<string, string> { ["id"] = d.Id, ["client_id"] = d.ClientId }).ToList(),
+        };
+        if (Web.Has(current, "document_types"))
+            meta["document_types"] = Web.StrArray(current, "document_types");
+        _rt.WriteConfigMeta(Documents, meta);
     }
 
     // ── companydata:webhook — the accumulating run + public receiver ────────────
