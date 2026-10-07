@@ -273,13 +273,15 @@ public sealed class CustomerClient
     /// <summary>
     /// Submit this party's turn (<paramref name="body"/> carries the encrypted per-party answers). It
     /// reads the run first and sets <c>source_private: true</c> on every answer in <c>body.answers</c>
-    /// that is private: a field whose default reaches a private source.
+    /// that is private: a field whose default reaches a private source. Every <c>values[].value</c> goes
+    /// out as the sealed wrapper's JSON string, whether the caller passed the wrapper object
+    /// <see cref="EncryptFlowAnswerAsync"/> returns or a string.
     /// </summary>
     public async Task<object?> SubmitFlowAnswersAsync(string connectionId, string runId, object body,
         System.Threading.CancellationToken ct = default)
     {
         object? payload = body;
-        if (Node.FromJsonString(JsonSerializer.Serialize(body)).ToObjectGraph() is Dictionary<string, object?> graph
+        if (Node.FromJsonString(JsonSerializer.Serialize(body, FlowSources.NodeAwareJson)).ToObjectGraph() is Dictionary<string, object?> graph
             && graph.TryGetValue("answers", out var answersObj) && answersObj is List<object?> { Count: > 0 } answers)
         {
             var run = await FlowRunAsync(connectionId, runId, ct).ConfigureAwait(false);
@@ -290,6 +292,11 @@ public sealed class CustomerClient
             foreach (var a in answers.OfType<Dictionary<string, object?>>())
                 if (a.TryGetValue("slug", out var s) && s?.ToString() is { } slug && sourcePrivate.Contains(slug))
                     a["source_private"] = true;
+            foreach (var a in answers.OfType<Dictionary<string, object?>>())
+                if (a.TryGetValue("values", out var valuesObj) && valuesObj is List<object?> values)
+                    foreach (var v in values.OfType<Dictionary<string, object?>>())
+                        if (v.TryGetValue("value", out var sealedValue) && sealedValue is not null)
+                            v["value"] = FlowSources.SealedString(sealedValue);
             payload = graph;
         }
         return (await _http.PostAsync($"{Conn}/{connectionId}/flow-runs/{runId}/answers", jsonBody: payload, ct: ct).ConfigureAwait(false)).ToObjectGraph();

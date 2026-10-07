@@ -123,7 +123,22 @@ internal static class FlowSources
         return await http.PostAsync(generatePath, jsonBody: body, ct: ct).ConfigureAwait(false);
     }
 
-    /// <summary>A sealed wrapper as the JSON string an upload body carries.</summary>
+    /// <summary>
+    /// Serializer options that write a <see cref="Node"/> as the JSON it holds, so a wrapper the caller
+    /// places in a body as <see cref="Crypto.EncryptForPublicKey"/> returned it survives normalization.
+    /// </summary>
+    internal static readonly JsonSerializerOptions NodeAwareJson = new() { Converters = { new NodeJsonConverter() } };
+
+    private sealed class NodeJsonConverter : System.Text.Json.Serialization.JsonConverter<Node>
+    {
+        public override Node Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+            => Node.FromJsonString(JsonDocument.ParseValue(ref reader).RootElement.GetRawText());
+
+        public override void Write(Utf8JsonWriter writer, Node value, JsonSerializerOptions options)
+            => writer.WriteRawValue(value.ToJsonString());
+    }
+
+    /// <summary>A sealed wrapper as the JSON string a flow-answer or upload body carries.</summary>
     internal static string SealedString(object sealedValue) => sealedValue switch
     {
         string s => s,

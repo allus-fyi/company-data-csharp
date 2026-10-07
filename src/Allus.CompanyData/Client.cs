@@ -1511,7 +1511,7 @@ public sealed class Client : IDisposable
                 values.Add(new Dictionary<string, object?>
                 {
                     ["for_user_id"] = uid,
-                    ["value"] = Crypto.EncryptForPublicKey(plain, key).ToObjectGraph(),
+                    ["value"] = FlowSources.SealedString(Crypto.EncryptForPublicKey(plain, key)),
                 });
             }
             var answer = new Dictionary<string, object?> { ["slug"] = slug, ["values"] = values };
