@@ -134,7 +134,7 @@ public sealed class CompanyDataHandlers
             // The saved service the run and the clean-up act as; the record of created documents is kept
             // across saves, each entry tagged with the service that created it.
             meta["client_id"] = Web.Str(body, "clientId") ?? "";
-            meta["created_documents"] = CreatedDocuments();
+            meta["created_documents"] = CreatedDocumentsRecord(CreatedDocuments());
             // Preserve presence so DoDocuments can distinguish an explicit empty selection from
             // an absent selection; absence means all document types.
             if (Web.Has(body, "documentTypes"))
@@ -415,6 +415,10 @@ public sealed class CompanyDataHandlers
     private void ForgetCreatedDocument(string docId, string clientId) =>
         WriteCreatedDocuments(CreatedDocuments().Where(d => !(d.Id == docId && d.ClientId == clientId)).ToList());
 
+    /// <summary>The sidecar shape of the record — the keys <c>CreatedDocuments</c> reads back.</summary>
+    private static List<Dictionary<string, string>> CreatedDocumentsRecord(List<CreatedDocument> all) =>
+        all.Select(d => new Dictionary<string, string> { ["id"] = d.Id, ["client_id"] = d.ClientId }).ToList();
+
     private void WriteCreatedDocuments(List<CreatedDocument> all)
     {
         var current = _rt.ReadConfigMeta(Documents);
@@ -422,7 +426,7 @@ public sealed class CompanyDataHandlers
         {
             ["share_code"] = Web.Str(current, "share_code") ?? "",
             ["client_id"] = Web.Str(current, "client_id") ?? "",
-            ["created_documents"] = all.Select(d => new Dictionary<string, string> { ["id"] = d.Id, ["client_id"] = d.ClientId }).ToList(),
+            ["created_documents"] = CreatedDocumentsRecord(all),
         };
         if (Web.Has(current, "document_types"))
             meta["document_types"] = Web.StrArray(current, "document_types");
