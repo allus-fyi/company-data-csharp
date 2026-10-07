@@ -222,11 +222,11 @@ public sealed class FlowRunTests : IDisposable
         };
         var spki = VectorPubSpkiB64();
         JsonElement captured = default;
-        var client = MakeRwClient(KeyGetRouter(spki), (m, url, body) =>
+        var client = MakeRwClient(NoGet, KeysBatch(spki, (m, url, body) =>
         {
             captured = ParseBody(body);
             return Resp.Json(200, RunObj("awaiting_person", "n_end", defJson: PriorAnswerDefJson));
-        });
+        }));
         using (client)
         {
             var run = RunFromObj(RunObj(answers: answers, defJson: PriorAnswerDefJson));
@@ -238,15 +238,29 @@ public sealed class FlowRunTests : IDisposable
 
     // ── submit: per-party fan-out + local routing ─────────────────────────────────
 
-    private Func<string, IReadOnlyDictionary<string, string>?, HttpResult> KeyGetRouter(string spki) =>
-        (url, q) =>
+    /// <summary>
+    /// Answers the by-user-id key fetch (POST /api/keys/batch) with spki for the person party and
+    /// hands every other write to next.
+    /// </summary>
+    private static Func<string, string, byte[]?, HttpResult> KeysBatch(
+        string spki, Func<string, string, byte[]?, HttpResult> next) =>
+        (m, url, body) =>
         {
-            if (url.EndsWith("/company-data/connections/csc-1"))
-                return Resp.Json(200, new { connection_id = "csc-1", share_code = "ABC123" });
-            if (url.EndsWith("/api/keys/ABC123"))
-                return Resp.Json(200, new { public_key = spki });
-            throw new Xunit.Sdk.XunitException("unexpected GET " + url);
+            if (url.EndsWith("/api/keys/batch"))
+                return Resp.Json(200, new Dictionary<string, object>
+                {
+                    [PersonUid] = new { public_key = spki, recipient_has_key = true },
+                });
+            return next(m, url, body);
         };
+
+    /// <summary>A sealed value travels as the wrapper's JSON string; this reads it back to the wrapper.</summary>
+    private static JsonElement SealedWrapper(JsonElement value)
+    {
+        Assert.Equal(JsonValueKind.String, value.ValueKind);
+        using var doc = JsonDocument.Parse(value.GetString()!);
+        return doc.RootElement.Clone();
+    }
 
     [Fact]
     public async Task SubmitFanOutAndRoutesFallthrough()
@@ -254,12 +268,12 @@ public sealed class FlowRunTests : IDisposable
         var spki = VectorPubSpkiB64();
         JsonElement captured = default;
         string capturedUrl = "";
-        var client = MakeRwClient(KeyGetRouter(spki), (m, url, body) =>
+        var client = MakeRwClient(NoGet, KeysBatch(spki, (m, url, body) =>
         {
             capturedUrl = url;
             captured = ParseBody(body);
             return Resp.Json(200, RunObj("awaiting_person", "n2"));
-        });
+        }));
         using (client)
         {
             var run = RunFromObj(RunObj());
@@ -272,11 +286,11 @@ public sealed class FlowRunTests : IDisposable
             var forUsers = values.EnumerateArray().Select(v => v.GetProperty("for_user_id").GetString()!).ToHashSet();
             Assert.Equal(new HashSet<string> { CompanyUid, PersonUid }, forUsers);
             foreach (var v in values.EnumerateArray())
-                Assert.Equal(1, v.GetProperty("value").GetProperty("_enc").GetInt32());
+                Assert.Equal(1, SealedWrapper(v.GetProperty("value")).GetProperty("_enc").GetInt32());
             // company copy round-trips with the service private key
             using var priv = Vector.PrivateKey();
-            var companyCopy = values.EnumerateArray().First(v => v.GetProperty("for_user_id").GetString() == CompanyUid)
-                .GetProperty("value");
+            var companyCopy = SealedWrapper(values.EnumerateArray()
+                .First(v => v.GetProperty("for_user_id").GetString() == CompanyUid).GetProperty("value"));
             Assert.Equal("ACME BV", Crypto.Decrypt(Node.FromJson(companyCopy).ToObjectGraph()!, priv));
             // local routing: no 'tier' → fallthrough to n2
             Assert.Equal("n2", captured.GetProperty("next_node").GetString());
@@ -291,11 +305,11 @@ public sealed class FlowRunTests : IDisposable
     {
         var spki = VectorPubSpkiB64();
         JsonElement captured = default;
-        var client = MakeRwClient(KeyGetRouter(spki), (m, url, body) =>
+        var client = MakeRwClient(NoGet, KeysBatch(spki, (m, url, body) =>
         {
             captured = ParseBody(body);
             return Resp.Json(200, RunObj("awaiting_person", "n_end"));
-        });
+        }));
         using (client)
         {
             var run = RunFromObj(RunObj());
@@ -387,20 +401,16 @@ public sealed class FlowRunTests : IDisposable
                     var docId = posts.Count > 0 ? "doc-9" : null;
                     return Resp.Json(200, RunObj(status, "n1", defJson: single, outputMode: "document", companyDocumentId: docId));
                 }
-                if (url.EndsWith("/company-data/connections/csc-1"))
-                    return Resp.Json(200, new { connection_id = "csc-1", share_code = "ABC123" });
-                if (url.EndsWith("/api/keys/ABC123"))
-                    return Resp.Json(200, new { public_key = spki });
                 throw new Xunit.Sdk.XunitException("unexpected GET " + url);
             },
-            (m, url, body) =>
+            KeysBatch(spki, (m, url, body) =>
             {
                 posts.Add(url);
                 if (url.EndsWith("/answers"))
                     return Resp.Json(200, RunObj("generating", "n1", defJson: single, outputMode: "document"));
                 Assert.EndsWith("/generate", url);
                 return Resp.Json(200, Generated);
-            });
+            }));
         using (client)
         {
             var run = await client.ProcessFlowRunAsync("run-1",
