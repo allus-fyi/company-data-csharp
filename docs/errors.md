@@ -52,6 +52,23 @@ as it does when the connection drops; an `HttpClient` you pass to `HttpTransport
 or an `IHttpTransport` of your own, keeps its own limit. A request given up may
 still have completed on the platform.
 
+## A connection closed before the answer is tried once more
+
+When the platform closes the connection before the answer's headers arrive,
+`HttpTransport` — the SDK's own, and one you pass an `HttpClient` — sends a
+request that has a body once more and reports only the second failure; a request
+without a body (GET, HEAD, a bodiless DELETE) is left to `HttpClient`, which
+replays those itself. An `IHttpTransport` of your own keeps its own behaviour. A
+request is never sent again once its response headers have arrived, after the 45
+seconds ran out, or when the connection could not be opened. The SDK cannot tell
+a reused connection from a new one, so a first request on a new connection
+closed this way is sent again too. Nor can it tell no answer at all from part of
+a status line or headers, so a write the platform received and began to answer
+before the connection dropped is delivered twice. A request the platform acted
+on before its connection died with no answer at all runs twice. `HttpClient`'s
+own replays are not bounded by the SDK: its handler retries a failed bodiless
+request up to three times, so such a request can reach the platform four times.
+
 ## 503 `db.writes_paused` — saving is paused, retry
 
 While the platform cannot complete a save in every region, a call can answer
