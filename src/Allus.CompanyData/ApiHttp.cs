@@ -195,6 +195,18 @@ public sealed class ApiHttp
         CancellationToken ct = default)
         => RequestAsync("POST", path, jsonBody: jsonBody, rawBody: rawBody, contentType: contentType, ct: ct);
 
+    /// <summary>
+    /// POST <paramref name="path"/> with a JSON body returning the whole 2xx <see cref="HttpResult"/>,
+    /// with no parse — the counterpart of <see cref="GetResponseAsync"/> for a route that answers JSON
+    /// whatever <c>Format</c> is; the caller parses it with <see cref="ParseResponseAsJson"/>.
+    /// Auth/refresh/retry and error mapping are identical to <see cref="PostAsync"/>.
+    /// </summary>
+    public Task<HttpResult> PostResponseAsync(
+        string path,
+        object jsonBody,
+        CancellationToken ct = default)
+        => RequestCoreAsync("POST", path, jsonBody: jsonBody, ct: ct);
+
     /// <summary>PUT <paramref name="path"/> with a JSON body → a parsed <see cref="Node"/>.</summary>
     public Task<Node> PutAsync(
         string path,

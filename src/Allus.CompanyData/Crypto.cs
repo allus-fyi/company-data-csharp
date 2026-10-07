@@ -26,6 +26,8 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Allus.CompanyData;
 
@@ -151,6 +153,25 @@ public static class Crypto
         {
             throw new DecryptException("decrypted plaintext is not valid UTF-8", ex);
         }
+    }
+
+    /// <summary>
+    /// One user's public key through <c>POST /api/keys/batch</c>, or null when the user has none.
+    /// The route answers JSON whatever the client's configured format is, so the body is parsed as
+    /// JSON. The answer is a flat map <c>{user_id: {public_key, public_key_sha256,
+    /// recipient_has_key}}</c> carrying every requested id; a user without a key has
+    /// <c>public_key</c> null. <paramref name="http"/> is the client's own HTTP layer, so auth,
+    /// rebase and retry are its own.
+    /// </summary>
+    internal static async Task<RSA?> FetchBatchPublicKeyAsync(ApiHttp http, string userId, CancellationToken ct)
+    {
+        var resp = await http.PostResponseAsync("/api/keys/batch",
+            new Dictionary<string, object?> { ["user_ids"] = new[] { userId } }, ct).ConfigureAwait(false);
+        var body = http.ParseResponseAsJson(resp);
+        if (body.Kind != NodeKind.Object || !body.Has(userId)) return null;
+        var entry = body.Get(userId);
+        var spki = entry.Kind == NodeKind.Object ? entry.Get("public_key").AsString() : entry.AsString();
+        return string.IsNullOrEmpty(spki) ? null : LoadPublicKey(spki);
     }
 
     /// <summary>

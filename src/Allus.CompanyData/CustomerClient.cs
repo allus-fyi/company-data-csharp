@@ -705,15 +705,7 @@ public sealed class CustomerClient
             if (_pubKeyCache.TryGetValue(userId, out var hit)) return hit;
             _pubKeyGen.TryGetValue(userId, out gen);
         }
-        var body = await _http.PostAsync($"{Keys}/batch",
-            jsonBody: new Dictionary<string, object?> { ["user_ids"] = new[] { userId } }, ct: ct).ConfigureAwait(false);
-        string? spki = null;
-        if (body.Kind == NodeKind.Object && body.Has("keys"))
-        {
-            var keys = body.Get("keys");
-            if (keys.Kind == NodeKind.Object && keys.Has(userId)) spki = keys.Get(userId).AsString();
-        }
-        var cached = string.IsNullOrEmpty(spki) ? null : Crypto.LoadPublicKey(spki!);
+        var cached = await Crypto.FetchBatchPublicKeyAsync(_http, userId, ct).ConfigureAwait(false);
         lock (_pubKeyLock)
         {
             // Store ONLY if no invalidation happened while the request was in flight.

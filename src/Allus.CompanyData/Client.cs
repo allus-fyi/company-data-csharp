@@ -116,6 +116,14 @@ public sealed class Client : IDisposable
     /// </summary>
     private readonly Dictionary<string, ulong> _pubkeyGen = new();
 
+    /// <summary>
+    /// Run-party public keys, by the party's user id, guarded by <see cref="_pubkeyLock"/>. A
+    /// rotation signal names a share code, which does not say which user id it belongs to, so
+    /// <see cref="InvalidatePublicKey"/> drops every entry and bumps one generation for the whole map.
+    /// </summary>
+    private readonly Dictionary<string, RSA> _userPubkeyCache = new();
+    private ulong _userPubkeyGen;
+
     // The service RSA public key (public half of the loaded private key), derived once.
     private RSA? _servicePublicKey;
 
@@ -541,6 +549,8 @@ public sealed class Client : IDisposable
             _pubkeyCache.Remove(shareCode);
             // Any fetch already in flight must not write its stale result back.
             _pubkeyGen[shareCode] = _pubkeyGen.TryGetValue(shareCode, out var g) ? g + 1 : 1;
+            _userPubkeyCache.Clear();
+            _userPubkeyGen++;
         }
     }
 
@@ -646,6 +656,25 @@ public sealed class Client : IDisposable
             // Store ONLY if no invalidation happened while the request was in flight.
             _pubkeyGen.TryGetValue(shareCode, out var now);
             if (now == gen) _pubkeyCache[shareCode] = key;
+        }
+        return key;
+    }
+
+    /// <summary>Fetch + cache a run party's RSA public key by its user id (POST /api/keys/batch).</summary>
+    private async Task<RSA> UserPublicKeyAsync(string userId, CancellationToken ct = default)
+    {
+        ulong gen;
+        lock (_pubkeyLock)
+        {
+            if (_userPubkeyCache.TryGetValue(userId, out var hit)) return hit;
+            gen = _userPubkeyGen;
+        }
+        var key = await Crypto.FetchBatchPublicKeyAsync(_http, userId, ct).ConfigureAwait(false);
+        if (key is null)
+            throw new ApiException(0, "keys.not_found", $"no public key for user {userId}");
+        lock (_pubkeyLock)
+        {
+            if (_userPubkeyGen == gen) _userPubkeyCache[userId] = key;
         }
         return key;
     }
@@ -1408,18 +1437,15 @@ public sealed class Client : IDisposable
 
     /// <summary>
     /// Resolve a person party's RSA public key for per-party answer encryption. Prefers a
-    /// caller-supplied key, else resolves the person's share_code from the run's connection →
-    /// GET /api/keys/{code}.
-    ///
-    /// Integration gap: the run payload exposes neither person public keys nor per-binding share
-    /// codes, so the SDK resolves via the connection. Supply <paramref name="partyPubKeys"/> to skip.
+    /// caller-supplied key, else fetches the party's key by its user id. A run's
+    /// <c>ConnectionId</c> names the company-connection pair, not a service link, so it is never
+    /// used to look the party up. Supply <paramref name="partyPubKeys"/> to skip the lookup.
     /// </summary>
     private async Task<RSA> FlowPersonPublicKeyAsync(
         FlowRun run, string uid, IReadOnlyDictionary<string, RSA> partyPubKeys, CancellationToken ct)
     {
         if (partyPubKeys.TryGetValue(uid, out var supplied)) return supplied;
-        var sc = await ResolveShareCodeAsync(run.ConnectionId, uid, ct).ConfigureAwait(false);
-        return await RecipientPublicKeyAsync(sc, ct).ConfigureAwait(false);
+        return await UserPublicKeyAsync(uid, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1430,7 +1456,7 @@ public sealed class Client : IDisposable
     /// POSTs {answers, next_node?/leaf, next_party?}. Returns the refreshed <see cref="FlowRun"/>. A
     /// document-mode leaf leaves the run "generating" — call <see cref="GenerateFlowDocumentAsync"/>
     /// (or <see cref="ProcessFlowRunAsync"/>, which chains it). <paramref name="partyPubKeys"/> may be
-    /// null; supply it to skip the share_code → /api/keys resolution for person parties.
+    /// null; supply it to skip the by-user-id key fetch (POST /api/keys/batch) for person parties.
     /// </summary>
     public async Task<FlowRun> SubmitFlowAnswersAsync(
         FlowRun run, IReadOnlyDictionary<string, object?> fill,
@@ -1840,6 +1866,10 @@ public sealed class Client : IDisposable
         _accountKey?.Dispose();
         _servicePublicKey?.Dispose();
         _pluginHttp.Dispose();
-        lock (_pubkeyLock) { foreach (var key in _pubkeyCache.Values) key.Dispose(); }
+        lock (_pubkeyLock)
+        {
+            foreach (var key in _pubkeyCache.Values) key.Dispose();
+            foreach (var key in _userPubkeyCache.Values) key.Dispose();
+        }
     }
 }
