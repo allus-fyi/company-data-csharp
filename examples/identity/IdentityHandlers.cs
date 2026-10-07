@@ -605,6 +605,9 @@ public sealed class IdentityHandlers
             TokenClientCredentialStyle = ClientCredentialStyle.PostBody,
             // Plain front-channel authorize (the platform does not implement Pushed Authorization Requests).
             DisablePushedAuthorization = true,
+            // Discovery names no userinfo_endpoint; the code exchange and id_token verification are the whole
+            // library call, and userinfo is read separately through the SDK's OAuth client.
+            LoadProfile = false,
         };
         // Issuer/endpoint override tolerance: discovery is driven off the configured api base, so a local
         // stack whose issuer host differs from the discovery host still works.
