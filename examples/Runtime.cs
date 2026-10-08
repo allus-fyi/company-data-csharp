@@ -51,9 +51,17 @@ public sealed class Runtime
 
     private static readonly JsonSerializerOptions PlainJson = new() { WriteIndented = true };
 
+    private readonly string _baseDir;
+
+    /// <summary>
+    /// Runtime state lives in <c>.runtime</c> under <paramref name="baseDir"/>, or in the directory the
+    /// <c>EXAMPLE_RUNTIME_DIR</c> environment variable names when it is set and non-empty.
+    /// </summary>
     public Runtime(string baseDir)
     {
-        RuntimeDir = Path.Combine(baseDir, ".runtime");
+        _baseDir = baseDir;
+        var env = Environment.GetEnvironmentVariable("EXAMPLE_RUNTIME_DIR");
+        RuntimeDir = string.IsNullOrEmpty(env) ? Path.Combine(baseDir, ".runtime") : Path.GetFullPath(env);
         RunsDir = Path.Combine(RuntimeDir, "runs");
         ConfigDir = Path.Combine(RuntimeDir, "config");
         ConfigKeysDir = Path.Combine(ConfigDir, "keys");
@@ -123,12 +131,17 @@ public sealed class Runtime
     public string MetaPathFor(string id) => Path.Combine(ConfigDir, $"{Sid(id)}.meta.json");
     public bool HasConfig(string id) => File.Exists(ConfigPathFor(id));
 
-    /// <summary>Write a scenario's canonical SDK config file. Returns the RELATIVE path (for display).</summary>
+    /// <summary>
+    /// Write a scenario's canonical SDK config file. Returns the path for display: relative to the example
+    /// directory under the default runtime directory, absolute under <c>EXAMPLE_RUNTIME_DIR</c>.
+    /// </summary>
     public string WriteConfig(string id, IDictionary<string, object?> config)
     {
         EnsureDirs();
         AtomicWrite(ConfigPathFor(id), JsonSerializer.Serialize(config, PlainJson));
-        return $".runtime/config/{Sid(id)}.json";
+        return RuntimeDir == Path.Combine(_baseDir, ".runtime")
+            ? $".runtime/config/{Sid(id)}.json"
+            : ConfigPathFor(id);
     }
 
     public void WriteConfigMeta(string id, IDictionary<string, object?> meta)
