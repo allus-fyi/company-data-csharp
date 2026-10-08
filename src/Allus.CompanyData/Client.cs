@@ -484,6 +484,20 @@ public sealed class Client : IDisposable
         return Connection.FromApi(body, TypeForSlugImpl, LoadedFieldTypes, DecryptValueImpl, (url, c) => BinaryFetchImpl(url, c));
     }
 
+    /// <summary>
+    /// End one of THIS service's connections (the service side of a disconnect).
+    /// <c>DELETE /api/company-data/connections/{id}</c>. It leaves exactly the state the customer's own
+    /// disconnect leaves; the customer is told by the platform, and <c>connection_deleted</c> reaches your
+    /// change feed and webhooks. Returns nothing. Throws <see cref="ApiException"/>: 404
+    /// <c>company_data.connection_not_found</c> for an id that is not a connection of this service, 409
+    /// <c>company_connections.active_contract</c> while the customer holds an active agreement or
+    /// subscription on it.
+    /// </summary>
+    public async Task DeleteConnectionAsync(string connectionId, CancellationToken ct = default)
+    {
+        await _http.DeleteAsync($"{ConnectionsPath}/{connectionId}", ct).ConfigureAwait(false);
+    }
+
     // ── logs (moderate rate-limit) ──────────────────────────────────────────────────────────────
 
     /// <summary>
