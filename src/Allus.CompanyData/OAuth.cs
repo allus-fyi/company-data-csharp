@@ -136,14 +136,15 @@ public sealed class OAuthClient
     public OAuthClient(
         Config config,
         IHttpTransport? transport = null,
-        string authorizeUrl = DefaultAuthorizeUrl,
+        string? authorizeUrl = null,
         Func<int, Task>? sleep = null)
     {
         if (string.IsNullOrEmpty(config.OAuthClientId) || string.IsNullOrEmpty(config.OAuthRedirectUri))
             throw new ConfigException("OAuthClient requires oauth_client_id + oauth_redirect_uri (idw role)");
         _config = config;
         _transport = transport ?? new HttpTransport();
-        _authorizeBase = authorizeUrl;
+        _authorizeBase = !string.IsNullOrEmpty(authorizeUrl) ? authorizeUrl
+            : !string.IsNullOrEmpty(config.AuthorizeUrl) ? config.AuthorizeUrl : DefaultAuthorizeUrl;
         _sleep = sleep ?? (ms => Task.Delay(ms));
         _apiUrl = config.ApiUrl.TrimEnd('/');
     }

@@ -69,15 +69,13 @@ public sealed class IdentityHandlers
     private static readonly HashSet<int> ClaimValueScenarios = new() { 3, 4, 5 };
 
     private const string DefaultApiUrl = "https://api.allme.fyi";
-    private static readonly string DefaultAuthorizeBase = OAuthClient.DefaultAuthorizeUrl; // https://web.allme.fyi/auth
 
     // The "what just happened" trace. Every entry is `<SDK method> — <what that call did in THIS
     // scenario>`, appended AT the call site, in the order the calls were made; an entry wrapped in
     // parentheses is a step that is deliberately NOT an SDK call. Keep them in step when this handler
     // changes: the panel is headed "What just happened", and a list that no longer matches the code is
     // worse than a short one.
-    private const string CallIdwBuild = "OAuthClient.FromConfig — builds the RP client from the saved config file: client id, secret and the registered redirect URI";
-    private const string CallIdwBuildLocal = "new OAuthClient(Config.FromIdwFile(…)) — builds the RP client from the saved config file: client id, secret and the registered redirect URI";
+    private const string CallIdwBuild = "OAuthClient.FromConfig — builds the RP client from the saved config file: client id, secret, the registered redirect URI and the sign-in address";
     private const string CallAuthSignin = "OAuthClient.AuthorizeUrl — the consent URL the person is sent to (mode signin, response_mode redirect, PKCE S256, state = this run id)";
     private const string CallAuthSigninDetached = "OAuthClient.AuthorizeUrl — the sign-in URL behind the link + QR (mode signin, response_mode detached, PKCE S256, state = this run id)";
     private const string CallAuthOneTime = "OAuthClient.AuthorizeUrl — the consent URL the person is sent to (mode one_time, claims email + phone, PKCE S256, state = this run id)";
@@ -153,6 +151,8 @@ public sealed class IdentityHandlers
         };
         if (Web.Str(body, "oauthClientSecret") is { Length: > 0 } secret)
             cfg["oauth_client_secret"] = secret;
+        if (OAuthUrlScenarios.Contains(id) && Web.Str(body, "authorizeBase") is { Length: > 0 } authorizeUrl)
+            cfg["authorize_url"] = authorizeUrl;
 
         // Any scenario whose run can carry claim values (ClaimValueScenarios) needs the OAuth app
         // private key to decrypt them (config-only keys).
@@ -178,8 +178,6 @@ public sealed class IdentityHandlers
 
         // Demo-only run parameters (NOT SDK Config fields) → meta sidecar.
         var meta = new Dictionary<string, object?>();
-        if (OAuthUrlScenarios.Contains(id))
-            meta["authorize_base"] = Web.Str(body, "authorizeBase") is { Length: > 0 } ab ? ab : DefaultAuthorizeBase;
         if (id == 3)
             meta["claims"] = Claims(body);
         if (id == 8)
@@ -213,7 +211,7 @@ public sealed class IdentityHandlers
                 run.Verifier = verifier;
                 var mode = id == 1 ? "signin" : id == 3 ? "one_time" : "connect";
                 var claims = id == 3 ? ClaimObjects(id) : null;
-                AddCall(run, IdwBuildCall(id));
+                AddCall(run, CallIdwBuild);
                 AddCall(run, id == 3 ? CallAuthOneTime : id == 4 ? CallAuthConnect : CallAuthSignin);
                 var oauth = OAuthClientFor(id);
                 var url = oauth.AuthorizeUrl(mode, claims, runId, "redirect", challenge);
@@ -227,7 +225,7 @@ public sealed class IdentityHandlers
                 var (verifier, challenge) = Pkce.Generate();
                 run.Verifier = verifier;
                 run.Wait = "detached_signin";
-                AddCall(run, IdwBuildCall(id));
+                AddCall(run, CallIdwBuild);
                 AddCall(run, CallAuthSigninDetached);
                 var oauth = OAuthClientFor(id);
                 var url = oauth.AuthorizeUrl("signin", null, runId, "detached", challenge);
@@ -294,7 +292,7 @@ public sealed class IdentityHandlers
             State = runId,
             Wait = responseMode == "detached" ? "detached_enroll" : "enroll_redirect",
         };
-        AddCall(run, IdwBuildCall(id));
+        AddCall(run, CallIdwBuild);
         AddCall(run, responseMode == "detached" ? CallAuthEnrollDetached : CallAuthEnroll);
         _rt.WriteRun(runId, run);
 
@@ -519,7 +517,7 @@ public sealed class IdentityHandlers
         var accessToken = result.AccessToken ?? "";
         if (accessToken.Length > 0)
         {
-            AddCall(run, IdwBuildCall(id));
+            AddCall(run, CallIdwBuild);
             var oauth = OAuthClientFor(id);
             AddCall(run, CallOidcUserinfo);
             try
@@ -552,33 +550,15 @@ public sealed class IdentityHandlers
     // ── SDK / OIDC client builders — built from the persisted config FILE ──────────
 
     /// <summary>
-    /// Build the OAuth client OFF the scenario's config file via the idw file constructor. FromConfig is
-    /// used for the default (deployed) authorize base — the acceptance path; a non-default base (local
-    /// stack) still loads Config from the file, only supplying the alternate base the wrapper cannot set.
+    /// Build the OAuth client OFF the scenario's config file via the idw file constructor; the sign-in
+    /// address is the file's <c>authorize_url</c> when present, else the SDK's live default.
     /// </summary>
     private OAuthClient OAuthClientFor(int id, bool shortTimeout = false)
     {
         var path = _rt.ConfigPathFor(id.ToString());
         IHttpTransport? transport = shortTimeout ? new HttpTransport(PollHttp) : null;
-        if (UsesDefaultAuthorizeBase(id))
-            return OAuthClient.FromConfig(path, transport);
-        var baseUrl = Web.Str(_rt.ReadConfigMeta(id.ToString()), "authorize_base") ?? "";
-        return new OAuthClient(Config.FromIdwFile(path), transport, authorizeUrl: baseUrl);
+        return OAuthClient.FromConfig(path, transport);
     }
-
-    /// <summary>
-    /// Whether <see cref="OAuthClientFor"/> takes the named-constructor branch. The SAME predicate decides
-    /// the client AND the trace entry, so the panel can never name a constructor that did not run —
-    /// the local-stack option really does build the client a different way.
-    /// </summary>
-    private bool UsesDefaultAuthorizeBase(int id)
-    {
-        var baseUrl = Web.Str(_rt.ReadConfigMeta(id.ToString()), "authorize_base") ?? "";
-        return baseUrl.Length == 0 || baseUrl == OAuthClient.DefaultAuthorizeUrl;
-    }
-
-    /// <summary>The trace entry for the OAuth client <see cref="OAuthClientFor"/> just built.</summary>
-    private string IdwBuildCall(int id) => UsesDefaultAuthorizeBase(id) ? CallIdwBuild : CallIdwBuildLocal;
 
     /// <summary>Build the service data client OFF the scenario's config file (service role).</summary>
     private Client ServiceClientFor(int id, bool shortTimeout = false)

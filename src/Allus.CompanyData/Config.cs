@@ -38,6 +38,7 @@ public sealed class Config
         (nameof(OAuthClientSecret), "ALLUS_OAUTH_CLIENT_SECRET"),
         (nameof(OAuthPrivateKey), "ALLUS_OAUTH_PRIVATE_KEY"),
         (nameof(OAuthKeyPassphrase), "ALLUS_OAUTH_KEY_PASSPHRASE"),
+        (nameof(AuthorizeUrl), "ALLUS_AUTHORIZE_URL"),
         (nameof(CacheDir), "ALLUS_CACHE_DIR"),
         (nameof(Format), "ALLUS_FORMAT"),
     };
@@ -92,6 +93,9 @@ public sealed class Config
 
     /// <summary>Idw role: passphrase that decrypts the app PEM in memory.</summary>
     public string? OAuthKeyPassphrase { get; init; }
+
+    /// <summary>Idw role (optional): the hosted sign-in page the OAuth client builds its link on; absent means the live address.</summary>
+    public string? AuthorizeUrl { get; init; }
 
     /// <summary>
     /// Per-webhook HMAC secrets keyed by webhook id (matched via <c>X-Allus-Webhook-Id</c>). A
@@ -334,6 +338,7 @@ public sealed class Config
             OAuthClientSecret = values.GetValueOrDefault(nameof(OAuthClientSecret)),
             OAuthPrivateKey = values.GetValueOrDefault(nameof(OAuthPrivateKey)),
             OAuthKeyPassphrase = values.GetValueOrDefault(nameof(OAuthKeyPassphrase)),
+            AuthorizeUrl = values.GetValueOrDefault(nameof(AuthorizeUrl)),
             Webhooks = webhooks,
             WebhookBearerToken = bearer,
             WebhookBasic = basicAuth,
@@ -399,6 +404,7 @@ public sealed class Config
         nameof(OAuthClientSecret) => "oauth_client_secret",
         nameof(OAuthPrivateKey) => "oauth_private_key",
         nameof(OAuthKeyPassphrase) => "oauth_key_passphrase",
+        nameof(AuthorizeUrl) => "authorize_url",
         nameof(CacheDir) => "cache_dir",
         nameof(Format) => "format",
         _ => field,

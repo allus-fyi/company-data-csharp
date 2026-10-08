@@ -18,7 +18,7 @@ public interface IRun
 /// tombstones, NO burn-on-read. The tree is git-ignored and wiped at startup:
 /// <list type="bullet">
 ///   <item>config/{sid}.json — a scenario's canonical SDK config file it runs OFF (NOT TTL-swept)</item>
-///   <item>config/{sid}.meta.json — demo-only run parameters (authorize_base, claims, webhook id, …)</item>
+///   <item>config/{sid}.meta.json — demo-only run parameters (claims, webhook id, …)</item>
 ///   <item>config/keys/&lt;sha1&gt;.pem — private-key file(s) a config references by path (0600)</item>
 ///   <item>runs/{runId}.json — one run's cross-request state (30-min TTL, lazy sweep)</item>
 ///   <item>webhook-route.json — the SINGLE active company-data webhook run {webhookId, runId}</item>
