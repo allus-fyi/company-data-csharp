@@ -1373,13 +1373,14 @@ public sealed class Client : IDisposable
     }
 
     /// <summary>
-    /// A completed run's DECRYPTED answers as <c>{slug: plaintext}</c>. Decrypts the
-    /// company's service-key answer copies of an already-fetched run — the public accessor for a
-    /// finished run's answers, since the private <c>DecryptRunAnswers</c> it wraps is otherwise
-    /// reached only inside <see cref="ProcessFlowRunAsync"/>, which returns an already-completed run
-    /// untouched. Fetch the run with <see cref="FlowRunAsync"/> first, then pass it here.
+    /// A completed run's DECRYPTED answers. Decrypts the company's service-key answer copies of an
+    /// already-fetched run — the public accessor for a finished run's answers, which
+    /// <see cref="ProcessFlowRunAsync"/> returns untouched. Fetch the run with
+    /// <see cref="FlowRunAsync"/> first, then pass it here.
+    /// <para>An answer the service key cannot open never fails the call: it is left out of
+    /// <c>Answers</c> and its slug is listed in <c>Unreadable</c>.</para>
     /// </summary>
-    public Dictionary<string, object?> FlowRunAnswers(FlowRun run) => DecryptRunAnswers(run);
+    public FlowRunAnswers FlowRunAnswers(FlowRun run) => OpenRunAnswers(run, skipUnreadable: true);
 
     /// <summary>
     /// Download the company's OWN copy of one output document a run generated — the PLAINTEXT file
@@ -1431,9 +1432,19 @@ public sealed class Client : IDisposable
     /// for_user_id is the company's bound user_id are decryptable with the service private key.
     /// </summary>
     private Dictionary<string, object?> DecryptRunAnswers(FlowRun run)
+        => OpenRunAnswers(run, skipUnreadable: false).Answers;
+
+    /// <summary>
+    /// Open the company's service-key answer copies. Only the rows whose <c>for_user_id</c> is the
+    /// company's bound user_id are decryptable with the service key. With
+    /// <paramref name="skipUnreadable"/> an answer that does not open (<see cref="DecryptException"/>)
+    /// is left out and its slug listed in <c>Unreadable</c>; without it the exception propagates.
+    /// </summary>
+    private FlowRunAnswers OpenRunAnswers(FlowRun run, bool skipUnreadable)
     {
         var serviceUid = run.ServiceUserId;
         var outMap = new Dictionary<string, object?>();
+        var unreadable = new List<string>();
         foreach (var row in run.Answers)
         {
             if (row.Get("for_user_id").AsString() != serviceUid) continue;
@@ -1442,11 +1453,21 @@ public sealed class Client : IDisposable
             // A file answer is a plaintext {"_enc_file": …} reference, not a wrapper; it stands in
             // the map as that reference, which reads as answered.
             var value = row.Get("value");
-            outMap[slug!] = FlowSources.FileRef(value) is not null
-                ? FlowSources.FileRefMarker(value)
-                : DecryptValueImpl(value);
+            if (FlowSources.FileRef(value) is not null)
+            {
+                outMap[slug!] = FlowSources.FileRefMarker(value);
+                continue;
+            }
+            try
+            {
+                outMap[slug!] = DecryptValueImpl(value);
+            }
+            catch (DecryptException) when (skipUnreadable)
+            {
+                unreadable.Add(slug!);
+            }
         }
-        return outMap;
+        return new FlowRunAnswers(outMap, unreadable);
     }
 
     /// <summary>

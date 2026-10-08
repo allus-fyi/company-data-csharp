@@ -208,6 +208,7 @@ public sealed class CompanyDataHandlers
                     value = StringifyValue(v.ValueObj),
                     live = v.Live,
                     at = Iso(v.UpdatedAt),
+                    unreadable = v.Unreadable,
                 });
             connections.Add(new
             {

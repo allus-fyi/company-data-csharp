@@ -165,7 +165,9 @@ reason. If you catch it, wait `ex.RetryAfter` (or a default) before retrying.
 | `Client.FromConfig` / `FromEnv` (construction) | `ConfigException` |
 | Token / any call (auth) | `AuthException` |
 | `ConnectionsAsync`, `ConnectionAsync`, `RequestFieldsAsync`, `LogsAsync`, pump drains | `ApiException`, `RateLimitException` |
-| Value access / `BinaryHandle.BytesAsync()` / pump delivery | `DecryptException`; `ApiException` on the binary slot file endpoint (incl. 410 `company_data.file_expired`) |
+| `BinaryHandle.BytesAsync()` / pump delivery / `ParseWebhook` / flow-run routing and generation | `DecryptException`; `ApiException` on the binary slot file endpoint (incl. 410 `company_data.file_expired`) |
+| `ConnectionsAsync`, `ConnectionAsync` (a value that cannot be opened) | none — the `Value` reads `Unreadable` |
+| `FlowRunAnswers` (an answer that cannot be opened) | none — its slug is listed in `FlowRunAnswers.Unreadable` |
 | `VerifyWebhook` / `ParseWebhook` / `HandleWebhook` | `WebhookException` (`VerifyWebhook` returns `false` rather than throwing on a bad signature) |
 
 ## Example
@@ -182,6 +184,6 @@ try
 catch (ConfigException) { /* fix the config / key file */ }
 catch (AuthException) { /* bad/revoked credentials */ }
 catch (RateLimitException e) { await Task.Delay(TimeSpan.FromSeconds(e.RetryAfter ?? 60)); }
-catch (DecryptException) { /* wrong service key or corrupt data */ }
+catch (DecryptException) { /* a binary value's bytes could not be opened (wrong service key or corrupt data) */ }
 catch (ApiException e) { Log(e.Status, e.ErrorKey, e.Message); }
 ```

@@ -415,7 +415,7 @@ public sealed class FlowHandlers
         AddCall(run, CallAnswers);
         var answers = client.FlowRunAnswers(flowRun);
         var ciphers = OwnCipherBySlug(flowRun);
-        run.Answers = answers
+        run.Answers = answers.Answers
             .Select(kv => new Dictionary<string, object?>
             {
                 ["slug"] = kv.Key,

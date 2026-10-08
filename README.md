@@ -207,7 +207,8 @@ honoring the API `total` (and stopping on a short page), and yields one typed
 is already decrypted (or a lazy binary handle).
 
 * **Params:** `limit` — page size (default 100); `offset` — starting offset.
-* **Throws:** `AuthException`, `ApiException`, `DecryptException` (per value, when accessed), `RateLimitException` (after the iterator's bounded internal backoff — see [Rate limits](#rate-limits)).
+* **Throws:** `AuthException`, `ApiException`, `RateLimitException` (after the iterator's bounded internal backoff — see [Rate limits](#rate-limits)).
+* **A value the service key cannot open never ends the listing.** It is returned in its own place with `ValueObj` `null` and `Unreadable` `true` (see [`Value`](#value)), and every other value and connection is returned as usual. When every value of every connection reads `Unreadable`, check the configured `service_private_key`.
 
 > **Heavily rate-limited.** Use for the initial full sync + occasional
 > reconciliation only — never as a poll substitute for the changes feed. The
@@ -228,7 +229,7 @@ Task<Connection> ConnectionAsync(string id, CancellationToken ct = default)
 Fetch one connection by its connection id (`GET /api/company-data/connections/{id}`).
 
 * **Returns:** one `Connection`. Note: this endpoint returns `{connection_id, user_id, values}` and **no** `display_name`/`connected_at`, so those identity fields are `null` here (the list endpoint carries them).
-* **Throws:** `AuthException`, `ApiException` (404 if unknown), `DecryptException`, `RateLimitException`.
+* **Throws:** `AuthException`, `ApiException` (404 if unknown), `RateLimitException`. A value the service key cannot open is returned marked `Unreadable`, never raised.
 
 ```csharp
 var conn = await client.ConnectionAsync(connId);
@@ -401,7 +402,7 @@ You work with these objects and nothing else (all in `Allus.CompanyData`):
 RequestField { Slug, Label, Type, OneTime, Mandatory, Verified, VerifiedMaxAgeDays, Plugin? }
 Connection   { Id, PersonId, DisplayName, ConnectedAt, Values: {<slug>: Value} }
 Value        { ValueObj, Live, UpdatedAt, Verified, VerifiedAt, VerifiedExpiresAt,
-               VerifiedMethod, VerifiedProvider, VerificationId }
+               VerifiedMethod, VerifiedProvider, VerificationId, Unreadable }
 Change       { Id, Event, PersonId, Slug?, ValueObj?, Live?, At }
 LogEntry     { Type, Message, Metadata, At }
 ```
@@ -413,7 +414,7 @@ explicit slug you set per request field in the portal — rename the label freel
 the slug is the contract. **The person's source field is never exposed**: no
 source slug, no `field_id`, not even via `.Raw`.
 
-### `Value(ValueObj, Live, UpdatedAt)` + `Verified`, `VerifiedAt`, `VerifiedExpiresAt`, `VerifiedMethod`, `VerifiedProvider`, `VerificationId`
+### `Value(ValueObj, Live, UpdatedAt)` + `Verified`, `VerifiedAt`, `VerifiedExpiresAt`, `VerifiedMethod`, `VerifiedProvider`, `VerificationId`, `Unreadable`
 
 | Member | Meaning |
 |--------|---------|
@@ -426,8 +427,11 @@ source slug, no `field_id`, not even via `.Raw`.
 | `VerifiedMethod` | HOW allme bound the value: `email_code` \| `sms_code` \| `sumsub_id` \| `sumsub_address`. |
 | `VerifiedProvider` | WHO established the proof: `allme` \| `sumsub`. |
 | `VerificationId` | The proof id to quote back to allme in a dispute — it resolves the full record, including facts you never receive. |
+| `Unreadable` | `true` when the answer is present but the configured service key cannot open it — sealed to a key the service has since replaced, or a wrong configured key. `ValueObj` is then `null` and `Verified` `false`; every other member is read as for a readable value. |
 
-The last three are the **proof metadata** and arrive **together or not at all**: a value bound before
+**Not readable is not empty.** An unanswered value is `ValueObj` `null` with `Unreadable` `false`; a value that could not be opened is `ValueObj` `null` with `Unreadable` `true`. A binary value is a lazy handle and is never marked: a binary whose file cannot be opened fails when its bytes are read. When every value of every connection reads `Unreadable`, check the configured `service_private_key`.
+
+`VerifiedMethod`, `VerifiedProvider` and `VerificationId` are the **proof metadata** and arrive **together or not at all**: a value bound before
 the proof log existed carries the four verification keys and none of these, so all three read `null`.
 They are readable whatever the verified boolean says — that boolean stays the only trust decision.
 
@@ -799,14 +803,14 @@ await client.DeleteDocumentAsync(contract.Id!);
 ### Contract flows & identity (#491)
 
 ```csharp
-Dictionary<string, object?> FlowRunAnswers(FlowRun run)                              // #491 gap 1 — a completed run's DECRYPTED answers {slug: plaintext}
+FlowRunAnswers FlowRunAnswers(FlowRun run)                                           // a completed run's DECRYPTED answers + the slugs that would not open
 Task<byte[]> FlowRunDocumentAsync(string runId, string outputKey, CancellationToken ct = default)   // the company's own copy of one generated output document (plaintext bytes)
 Task<Identity> IdentityAsync(CancellationToken ct = default)                          // #491 gap 3 — this client's {CompanyUserId, ServiceId}
 ```
 
 ```csharp
 var run = await client.FlowRunAsync(runId);
-Dictionary<string, object?> answers = client.FlowRunAnswers(run);   // {"work_email": "alice@example.com", …}
+Dictionary<string, object?> answers = client.FlowRunAnswers(run).Answers;   // {"work_email": "alice@example.com", …}
 
 // A document leaf can produce several output documents; download the company's copy of each.
 var own = run.Participants.FirstOrDefault(p => p.PartyKey == run.CompanyPartyKey);
@@ -824,7 +828,7 @@ var bindings = new Dictionary<string, string>
 await client.TriggerFlowRunAsync(flowId, connection.Id!, bindings);
 ```
 
-* `FlowRunAnswers(run)` returns a completed run's decrypted `{slug: plaintext}` answers (pass a fetched `FlowRun`). It is the public accessor for a finished run's answers, which `ProcessFlowRunAsync` returns untouched.
+* `FlowRunAnswers(run)` returns a completed run's answers as a `FlowRunAnswers` (pass a fetched `FlowRun`): `Answers` is the decrypted `{slug: plaintext}` map, `Unreadable` the list of slugs whose answer the service key could not open (empty when every answer opened). An unreadable answer is left out of `Answers` and never fails the call. It is the public accessor for a finished run's answers, which `ProcessFlowRunAsync` returns untouched.
 * A document leaf can produce several named **output documents** (e.g. "Contract" and "Addendum"). `GenerateFlowDocumentAsync(run)` returns the API response `{documents, status}` — one `{output_key, party_key, document_id, position}` per produced (output document, participant); `position` is the step's 1-based place in the run's ONE signing line (one signer at a time, across every output), null for a party an output's signer list does not name. A repeat answers the same set.
 * A `FlowRun`'s `Participants` are `FlowRunParticipant(PartyKey, PersonUserId, ConnectionId, Documents)`; `Documents` is that participant's own copy of each output document — `FlowRunParticipantDocument(OutputKey, Name, DocumentId, DocumentStatus, RequiresSignature, RequiresAcceptance, Position, Action, ActedAt)`, ordered by line position.
 * `FlowRunDocumentAsync(runId, outputKey)` downloads the company's own service-key-encrypted copy of one output document and returns the plaintext file bytes — the honest completion step (fill → complete → `FlowRunAnswers` → `FlowRunDocumentAsync` per output). A `404` is `flows.run_not_found` for an unknown run, or `flows.no_document` when that output was not produced or the company is not a bound party.
@@ -1273,7 +1277,7 @@ C#'s `*Exception` convention).
 | `ConfigException` | Missing/invalid config, unreadable key file, or wrong passphrase — at construction (fail fast). |
 | `AuthException` | Token fetch/refresh failed (bad `client_id`/`secret`, revoked client); or a 401 survives the one automatic refresh-and-retry. |
 | `ApiException(Status, ErrorKey, Details)` | Any non-2xx from the API; carries the HTTP `Status`, the platform `ErrorKey` (when present), a message, and `Details` — the body's remaining fields verbatim (e.g. a 410 `company_data.file_expired`'s `content_sha256` + `expired_at`). |
-| `DecryptException` | A ciphertext wrapper is malformed, the key is wrong, or the GCM tag mismatches. Surfaces when a value is accessed/decrypted. |
+| `DecryptException` | A ciphertext wrapper is malformed, the key is wrong, or the GCM tag mismatches. Surfaces when a binary value's bytes are read, on a change event (the pump dead-letters it; a webhook parse throws it) and from flow-run routing and generation. `ConnectionsAsync`/`ConnectionAsync` never throw it for a value — they mark it `Unreadable` — and `FlowRunAnswers` lists such an answer under `Unreadable`. |
 | `WebhookException` | Signature verification failed, or an envelope couldn't be unwrapped/parsed. |
 | `RateLimitException(RetryAfter)` | A 429 from a rate-limited endpoint. Subclass of `ApiException` (Status fixed at 429); carries `RetryAfter` (seconds, or `null`). |
 | `ValidationException(Slug, FieldType, Bound?, BoundValue?)` | A value fails its field type's check, or (`Bound` = `"min"`/`"max"`) lies outside a flow field's bound. |

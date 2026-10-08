@@ -7,7 +7,7 @@
 //   RequestField { Slug, Label, Type, OneTime, Mandatory, Verified, VerifiedMaxAgeDays }
 //   Connection   { Id, PersonId, DisplayName, ConnectedAt, Values: {<slug>: Value} }
 //   Value        { ValueObj, Live, UpdatedAt, Verified, VerifiedAt, VerifiedExpiresAt,
-//                  VerifiedMethod, VerifiedProvider, VerificationId }
+//                  VerifiedMethod, VerifiedProvider, VerificationId, Unreadable }
 //   Change       { Id, Event, PersonId, ShareCode?, Slug?, Value?, Live?, At }   // Id = stable dedup key
 //   LogEntry     { Type, Message, Metadata, At }
 //
@@ -214,6 +214,11 @@ public sealed record RequestFieldPlugin(string? PluginName, string? FieldType, I
 /// plaintext (string / dictionary / DateOnly / lazy BinaryHandle); <see cref="Live"/> = the person
 /// chose "keep connected" (auto-updates) vs a one-time snapshot; <see cref="UpdatedAt"/> = when this
 /// answer last changed. Both ride on the Value (per-answer), not the definition.
+/// <para><see cref="Unreadable"/> marks an answer that is present but could not be opened with the
+/// configured service key — sealed to a key the service has since replaced, or a wrong configured
+/// key. Such a value carries <see cref="ValueObj"/> null and <see cref="Verified"/> false, and never
+/// fails the read it arrived in. An unanswered value is <see cref="ValueObj"/> null with
+/// <see cref="Unreadable"/> false.</para>
 /// </summary>
 public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedAt)
 {
@@ -249,6 +254,19 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
     /// <summary>The id to quote back to allme in a dispute. Same all-or-none set.</summary>
     public string? VerificationId { get; init; }
 
+    /// <summary>
+    /// True when the answer is present but could not be opened with the configured service key;
+    /// <see cref="ValueObj"/> is then null and <see cref="Verified"/> false. Every value of every
+    /// connection reading true points at the configured key.
+    /// </summary>
+    public bool Unreadable { get; init; }
+
+    /// <summary>
+    /// Build a typed Value from one hardened <c>{value|value_url, live, updatedAt}</c> entry. An
+    /// entry whose value cannot be opened (<see cref="DecryptException"/>) is built marked
+    /// <see cref="Unreadable"/>, with no plaintext; every other member is read from the entry as for a
+    /// readable one. Any other failure propagates.
+    /// </summary>
     public static Value FromApi(
         Node obj,
         string? fieldType,
@@ -259,7 +277,16 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
         var live = ModelCoerce.CoerceBool(obj.Get("live")) ?? false;
         var updatedAt = ModelCoerce.ParseIsoDt(
             obj.Has("updatedAt") ? obj.Get("updatedAt").AsString() : obj.Get("updated_at").AsString());
-        var typed = TypedValue(obj, fieldType, fieldTypes, decryptValue, binaryFetch);
+        object? typed = null;
+        var unreadable = false;
+        try
+        {
+            typed = TypedValue(obj, fieldType, fieldTypes, decryptValue, binaryFetch);
+        }
+        catch (DecryptException)
+        {
+            unreadable = true;
+        }
         return new Value(typed, live, updatedAt)
         {
             Raw = obj.ToObjectGraph(),
@@ -269,6 +296,7 @@ public sealed record Value(object? ValueObj, bool Live, DateTimeOffset? UpdatedA
             VerifiedMethod = obj.Get("verified_method").AsString(),
             VerifiedProvider = obj.Get("verified_provider").AsString(),
             VerificationId = obj.Get("verification_id").AsString(),
+            Unreadable = unreadable,
         };
     }
 
@@ -873,6 +901,15 @@ public sealed record FlowRun(
 /// source's party.
 /// </summary>
 public sealed record FlowRunSourceFile(string SourceKey, string ForUserId, string File);
+
+/// <summary>
+/// A run's answers as the company's service key opens them. <see cref="Answers"/> holds every answer
+/// the key opened, <c>{slug: plaintext}</c>; <see cref="Unreadable"/> lists the slugs of the answers
+/// present on the run that it could not open (sealed to a key the service has since replaced, or a
+/// wrong configured key), empty when every answer opened. An unreadable slug is never in
+/// <see cref="Answers"/>.
+/// </summary>
+public sealed record FlowRunAnswers(Dictionary<string, object?> Answers, IReadOnlyList<string> Unreadable);
 
 /// <summary>
 /// The latest published version of a flow — what <see cref="Client.TriggerFlowRunAsync"/> compiles a

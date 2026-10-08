@@ -146,7 +146,7 @@ finds the run by it.
 | Trigger the run | `Client.TriggerFlowRunAsync(flowId, connectionId, bindings)` |
 | Each poll — read the run | `Client.FlowRunAsync(flowRunId)` |
 | Drive one company step | `Client.ProcessFlowRunAsync(flowRunId, fillNode)` (a rejected value throws `ValidationException`; at a document leaf it uploads the run's held source PDFs as generation inputs before generating) |
-| On completion — answers | `Client.FlowRunAnswers(run)` (decrypted `{slug: value}`) |
+| On completion — answers | `Client.FlowRunAnswers(run)` (decrypted `Answers` `{slug: value}` and the `Unreadable` slugs) |
 | On completion — documents | `Client.FlowRunDocumentAsync(flowRunId, outputKey)` for each output document in the company participant's `Documents` (contract fixture only) |
 
 The handler lives in **`flow/FlowHandlers.cs`**. The platform flow-run id is never a
