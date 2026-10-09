@@ -85,8 +85,19 @@ public sealed record CustomerConnection(
     }
 }
 
-/// <summary>A typed answer to a consent/edit request row (before encryption).</summary>
-public sealed record TypedAnswer(string RequestFieldId, string Value, string Kind = "typed");
+/// <summary>
+/// A typed answer to a consent/edit request row (before encryption). Kind <c>"keep"</c>
+/// (<see cref="Keep"/>, edit only) keeps the row's stored answer as it is and carries no value; the
+/// API accepts it only for a row that holds an answer now.
+/// </summary>
+public sealed record TypedAnswer(string RequestFieldId, string Value, string Kind = "typed")
+{
+    /// <summary>An edit decision that keeps <paramref name="requestFieldId"/>'s stored answer as it is.</summary>
+    public static TypedAnswer Keep(string requestFieldId) => new(requestFieldId, "", "keep");
+
+    /// <summary>Whether this answer keeps the row's stored answer.</summary>
+    public bool IsKeep => Kind == "keep";
+}
 
 /// <summary>A flow party for <see cref="CustomerClient.EncryptFlowAnswer"/>.</summary>
 public sealed record FlowParty(string UserId, string? Type = null, bool IsOwner = false);
@@ -213,6 +224,11 @@ public sealed class CustomerClient
     public async Task<object?> DeclineConsentAsync(string consentId, System.Threading.CancellationToken ct = default)
         => (await _http.PostAsync($"{Consents}/{consentId}/decline", jsonBody: null, ct: ct).ConfigureAwait(false)).ToObjectGraph();
 
+    /// <summary>
+    /// Edit a service link's answers. <paramref name="answers"/> is the WHOLE answer set: a row it
+    /// sends nothing for is withdrawn, and a row answered with <see cref="TypedAnswer.Keep"/> keeps
+    /// its stored answer.
+    /// </summary>
     public async Task<object?> EditAnswersAsync(string connectionId, string serviceLinkId,
         IReadOnlyList<TypedAnswer> answers, string companyCode, string serviceCode,
         System.Threading.CancellationToken ct = default)
@@ -667,16 +683,20 @@ public sealed class CustomerClient
         var types = await RequestFieldTypesAsync(companyCode, serviceCode, ct).ConfigureAwait(false);
         foreach (var a in answers)
         {
+            if (a.IsKeep) continue;
             var registry = await FieldTypesAsync(ct).ConfigureAwait(false);
             if (types.TryGetValue(a.RequestFieldId, out var ft) && !registry.IsFieldValueValid(ft, a.Value))
                 throw new ValidationException(a.RequestFieldId, ft);
         }
-        return answers.Select(a => (object)new Dictionary<string, object?>
-        {
-            ["request_field_id"] = a.RequestFieldId,
-            ["kind"] = a.Kind,
-            ["value"] = Crypto.EncryptForPublicKey(a.Value, pub).ToObjectGraph(),
-        }).ToList();
+        // A kept row carries no value: nothing to encrypt.
+        return answers.Select(a => (object)(a.IsKeep
+            ? new Dictionary<string, object?> { ["request_field_id"] = a.RequestFieldId, ["kind"] = "keep" }
+            : new Dictionary<string, object?>
+            {
+                ["request_field_id"] = a.RequestFieldId,
+                ["kind"] = a.Kind,
+                ["value"] = Crypto.EncryptForPublicKey(a.Value, pub).ToObjectGraph(),
+            })).ToList();
     }
 
     private async Task<RSA?> ServiceKeyAsync(string companyCode, string serviceCode, System.Threading.CancellationToken ct)
