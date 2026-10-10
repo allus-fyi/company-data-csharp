@@ -370,12 +370,13 @@ public sealed class IdentityHandlers
 
     /// <summary>
     /// Short-cycled advance for a pending run awaiting a detached / challenge outcome. ONE SDK wait with
-    /// timeout=2 per poll; the SDK's LOGICAL "not completed within Ns" timeout is treated as still-pending;
-    /// a real transport failure is a failed run. Clients are rebuilt from the run's scenario config file.
+    /// timeout=2 per poll; a poll that got no HTTP response, or a 503, stays pending, and any other error is
+    /// a failed run. Clients are rebuilt from the run's scenario config file.
     /// </summary>
     private async Task<Run> Advance(Run run)
     {
         var id = run.Scenario;
+        string? signinCode = null;
         try
         {
             switch (run.Wait)
@@ -386,7 +387,7 @@ public sealed class IdentityHandlers
                     var oauth = OAuthClientFor(id, shortTimeout: true);
                     var body = await oauth.PollResultAsync(run.State!, 2, 2);
                     if (body.TryGetProperty("code", out var codeEl) && codeEl.GetString() is { Length: > 0 } code)
-                        run = await CompleteSignin(run, code);
+                        signinCode = code;
                     break;
                 }
                 case "detached_enroll":
@@ -413,17 +414,38 @@ public sealed class IdentityHandlers
                 // else (redirect / continue-on-phone): completion arrives via /callback — stay pending.
             }
         }
-        catch (ApiException e) when (e.Status == 0 && e.Message.Contains("not completed within"))
+        catch (Exception e) when (
+            e is ApiException { Status: 0 or 503 }
+            || e is AuthException && e.Message.StartsWith("token request failed:", StringComparison.Ordinal)
+            || e is HttpRequestException)
         {
-            // The SDK poll helpers signal a LOGICAL "not completed within Ns" timeout as ApiException(0)
-            // with that exact sentinel — still pending (contract §"short-cycled SDK waits").
+            // A poll that never received an HTTP response leaves the run pending; the next browser poll
+            // retries. That is: an ApiException with status 0 (the SDK's logical "not completed within"
+            // timeout, or a transport failure on a data call), an AuthException whose token request
+            // failed before any response, and the HttpRequestException the OAuth poll passes through
+            // from the transport. A 503 is pending too. Any other error is an answer another poll
+            // cannot change.
             return run;
         }
         catch (Exception e)
         {
-            // A real network/transport failure (or any other error) is a failed run, not eternal pending.
+            // Any error another poll cannot change is a failed run.
             run.Status = "failed";
             run.Error = e.Message;
+        }
+        // The delivered code is one-shot, so completing the sign-in is outside the retry rule above: a
+        // failure here ends the run instead of re-polling a result that is already consumed.
+        if (signinCode is not null)
+        {
+            try
+            {
+                run = await CompleteSignin(run, signinCode);
+            }
+            catch (Exception e)
+            {
+                run.Status = "failed";
+                run.Error = e.Message;
+            }
         }
         return run;
     }
