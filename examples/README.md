@@ -213,10 +213,8 @@ secret**, so set it up before running:
    here). Copy the **webhook id** and the one-time **HMAC secret** into the scenario's
    inputs and **Save**.
 2. Point the webhook at this server's `POST /webhook`:
-   - **Local stack** — the local delivery worker reaches `localhost` directly, so
-     register **`http://localhost:8091/webhook`**. No tunnel needed.
-   - **Deployed platform** — the cluster cannot reach your `localhost`, so a tunnel is
-     **optional but required for live deliveries**. Open one and register its public
+   - **Any stack** — a webhook URL must be `https` on port 443 to a public address, so a
+     `localhost` URL is refused. A tunnel is **optional but required for live deliveries**. Open one and register its public
      URL with **`/webhook`** appended:
 
      ```bash
