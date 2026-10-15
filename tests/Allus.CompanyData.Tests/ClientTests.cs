@@ -779,7 +779,7 @@ public sealed class ClientTests : IDisposable
         var (client, _) = MakeRw(
             (url, q) =>
             {
-                if (url.EndsWith("/documents")) return Resp.Json(200, new { total = 0, items = Array.Empty<object>() });
+                if (url.EndsWith("/documents")) return Resp.Json(200, new { items = Array.Empty<object>(), next = (string?)null });
                 if (url.Contains("/documents/d9")) return Resp.Json(200, new { id = "d9", payload_kind = "json", is_private = false, value = new { a = 1 } });
                 throw new Xunit.Sdk.XunitException("unexpected GET " + url);
             },
@@ -790,7 +790,9 @@ public sealed class ClientTests : IDisposable
             });
         using (client)
         {
-            Assert.Empty(await client.ListDocumentsAsync(status: "active"));
+            var listed = new List<Document>();
+            await foreach (var d in client.ListDocumentsAsync(status: "active")) listed.Add(d);
+            Assert.Empty(listed);
             Assert.Equal("d9", (await client.DocumentAsync("d9")).Id);
             await client.UpdateDocumentStatusAsync("d9", "ended");
             await client.UpdateDocumentMetadataAsync("d9", name: "renamed");

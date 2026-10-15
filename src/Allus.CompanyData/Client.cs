@@ -869,23 +869,35 @@ public sealed class Client : IDisposable
         return doc;
     }
 
-    /// <summary>List this service's documents (paged; optional person/status filter).</summary>
-    public async Task<List<Document>> ListDocumentsAsync(
+    /// <summary>
+    /// Every document of this service, newest first, as a lazy stream (optional person/status
+    /// filter). It pages <c>GET /api/company-data/documents</c> with its cursor: <paramref name="limit"/>
+    /// is the page size (1–500), and each page's <c>next</c> marker is sent back as <c>after</c> until
+    /// a page answers none. A page is fetched only once the previous one has been consumed.
+    /// </summary>
+    public async IAsyncEnumerable<Document> ListDocumentsAsync(
         string? personUserId = null,
         string? status = null,
         int limit = 100,
-        int offset = 0,
-        CancellationToken ct = default)
+        [EnumeratorCancellation] CancellationToken ct = default)
     {
-        var query = new Dictionary<string, string>
+        var page = Math.Min(500, Math.Max(1, limit));
+        string? after = null;
+        while (true)
         {
-            ["limit"] = Math.Max(1, limit).ToString(),
-            ["offset"] = Math.Max(0, offset).ToString(),
-        };
-        if (!string.IsNullOrEmpty(personUserId)) query["person_user_id"] = personUserId;
-        if (!string.IsNullOrEmpty(status)) query["status"] = status;
-        var body = await _http.GetAsync(DocumentsPath, query, ct).ConfigureAwait(false);
-        return Document.ListFromApi(body, DecryptValueImpl);
+            var query = new Dictionary<string, string> { ["limit"] = page.ToString() };
+            if (!string.IsNullOrEmpty(personUserId)) query["person_user_id"] = personUserId;
+            if (!string.IsNullOrEmpty(status)) query["status"] = status;
+            if (after is not null) query["after"] = after;
+            var body = await _http.GetAsync(DocumentsPath, query, ct).ConfigureAwait(false);
+            foreach (var doc in Document.ListFromApi(body, DecryptValueImpl))
+            {
+                yield return doc;
+            }
+            var next = body.Get("next").AsString();
+            if (string.IsNullOrEmpty(next)) yield break;
+            after = next;
+        }
     }
 
     /// <summary>Fetch one document by id → <see cref="Document"/>.</summary>

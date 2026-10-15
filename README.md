@@ -762,9 +762,10 @@ and `signer_name_verified` beside its existing `action`/`method`/
 ### List, fetch, update, delete
 
 ```csharp
-// List this service's documents (paged; optional person / status filter).
-var docs = await client.ListDocumentsAsync(status: "ready_to_sign", limit: 50);
-foreach (var d in docs)
+// Every document of this service, newest first (optional person / status filter):
+// a lazy stream that pages GET /api/company-data/documents with its cursor and fetches
+// the next page only once this one is consumed. `limit` is the page size (1–500).
+await foreach (var d in client.ListDocumentsAsync(status: "ready_to_sign", limit: 50))
     Console.WriteLine($"{d.Id} {d.Name} [{d.Status}]");
 
 // Fetch one by id.
