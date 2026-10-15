@@ -555,10 +555,12 @@ A change-feed / webhook event.
 | Member | Meaning |
 |--------|---------|
 | `Id` | **The stable server change-row id — your dedup key** (captured before the server delete). |
-| `Event` | `connection_created`, `connection_deleted`, `field_updated`, `field_deleted`, `consent_accepted`, `consent_declined`, `document_status_changed`, `message_received`. |
+| `Event` | `connection_created`, `connection_deleted`, `field_updated`, `field_deleted`, `consent_accepted`, `consent_declined`, `document_status_changed`, `document_sealed`, `message_received`. |
 | `PersonId` | The person the change is about (may be `null`). |
 | `Slug`, `ValueObj`, `Live` | Present only on `field_updated`; `ValueObj` is typed exactly like `Value.ValueObj` (incl. a lazy `BinaryHandle` for binaries). Connection/consent events carry no slot/value. |
 | `ConnectionId`, `MessageId`, `PersonPublicKey`, `MessageBody` | Present only on `message_received` — a person messaged your service. `MessageBody` is the **decrypted** text. See [Messaging](#messaging). |
+| `SignerFirstName`, `SignerLastName`, `SignerNameVerified`, `Note` | Present on `document_status_changed`. The signer names and the note arrive encrypted to your service key; the SDK decrypts them, so these are **plaintext**. |
+| `SealedAt`, `PlainSha256` | Present only on `document_sealed` — the platform sealed a file document. |
 | `Verified`, `VerifiedAt`, `VerifiedExpiresAt` | Present on `field_updated`, with the same meaning as on `Value`. |
 | `VerifiedMethod`, `VerifiedProvider`, `VerificationId` | The proof metadata, same meaning and same all-or-none rule as on `Value`. |
 | `At` | `DateTimeOffset?` of the change. (There is no separate `UpdatedAt` on a change.) |
@@ -910,10 +912,16 @@ element on the company's own step and check a field's min/max — see [Plugins](
 When a recipient acts on a document (e.g. signs it), the platform emits a
 **`document_status_changed`** change event. It carries `Change.DocumentId` and
 `Change.Status` (no slot/slug/value), so handle it alongside the field events. A
-transition to `active` additionally carries `Change.SealedAt`,
-`Change.PlainSha256`, `Change.SignerFirstName`, `Change.SignerLastName` and
-`Change.SignerNameVerified` — the same seal state the document read carries, so
-you never need a follow-up `DocumentAsync(id)` call just to learn a run sealed:
+signature additionally carries `Change.SignerFirstName`, `Change.SignerLastName` and
+`Change.SignerNameVerified`, and a cancellation `Change.Note`; the signer names and
+the note arrive encrypted to your service key and the SDK decrypts them. When the
+platform seals a file document it emits a separate **`document_sealed`** event
+carrying `Change.DocumentId`, `Change.SealedAt` and `Change.PlainSha256` — the same
+seal state the document read carries, so you never need a follow-up
+`DocumentAsync(id)` call just to learn a document sealed. A JSON contract is never
+sealed and raises no `document_sealed`. A webhook subscribed to
+`document_status_changed` alone does not receive `document_sealed`; subscribe to it
+as well. In the pump:
 
 ```csharp
 async Task Handle(Change change)
@@ -923,6 +931,9 @@ async Task Handle(Change change)
     {
         case "document_status_changed":
             await OnDocumentStatus(change.DocumentId, change.Status);   // e.g. "active"
+            break;
+        case "document_sealed":
+            await OnDocumentSealed(change.DocumentId, change.SealedAt, change.PlainSha256);
             break;
         case "field_updated":
             await Store(change.PersonId, change.Slug, change.ValueObj);

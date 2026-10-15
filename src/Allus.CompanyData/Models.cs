@@ -468,10 +468,10 @@ public sealed record Change(
     string? Slug = null,
     object? ValueObj = null,
     bool? Live = null,
-    string? DocumentId = null,  // set on document_status_changed
+    string? DocumentId = null,  // set on document_status_changed and document_sealed
     string? Status = null,      // set on document_status_changed
     string? Action = null,      // set on document_status_changed for a contract: signed | accepted | cancelled
-    string? Note = null,        // set on document_status_changed: the person's optional cancellation note
+    string? Note = null,        // set on document_status_changed: the person's optional cancellation note, decrypted from service-key ciphertext
     string? Method = null,        // set on a signature: biometric | twofa | email | custodian
     string? ContentSha256 = null, // set on a signature: SHA-256 of the signed content
     string? SignedAt = null,      // set on a signature: ISO timestamp the signature was recorded
@@ -523,15 +523,16 @@ public sealed record Change(
     /// <summary>Set on <c>message_received</c> — the DECRYPTED message text.</summary>
     public string? MessageBody { get; init; }
 
-    /// <summary>Set on <c>document_status_changed</c> — when the platform seal was applied; null until sealed.</summary>
+    /// <summary>Set on <c>document_sealed</c> — when the platform seal was applied; null on every other event.</summary>
     public DateTimeOffset? SealedAt { get; init; }
 
-    /// <summary>Set on <c>document_status_changed</c> — SHA-256 of the document's unencrypted PDF bytes; null on a JSON contract.</summary>
+    /// <summary>Set on <c>document_sealed</c> — SHA-256 of the document's unencrypted PDF bytes, lowercase hex; null on every other event.</summary>
     public string? PlainSha256 { get; init; }
 
-    /// <summary>Set on <c>document_status_changed</c> — the signature's own signer evidence.</summary>
+    /// <summary>Set on <c>document_status_changed</c> — the signer's first name, decrypted from service-key ciphertext.</summary>
     public string? SignerFirstName { get; init; }
 
+    /// <summary>Set on <c>document_status_changed</c> — the signer's last name, decrypted from service-key ciphertext.</summary>
     public string? SignerLastName { get; init; }
 
     /// <summary>True iff the submitted name matched the signer's verified ID name; null when unset.</summary>
@@ -568,6 +569,20 @@ public sealed record Change(
             messageBody = decryptValue(obj.Get("body"));
         }
 
+        // document_status_changed carries the signer names and the note as service-key ciphertext
+        // (the same wrapper string as a message body), or null; the ordinary decrypt opens each.
+        // An absent, null or empty member (XML renders null as an empty element) is null and is
+        // not decrypted.
+        var isStatus = ev == "document_status_changed";
+        string? OpenStatusText(string key)
+        {
+            var n = obj.Get(key);
+            if (!isStatus || n.IsNull || (n.Kind == NodeKind.Scalar && string.IsNullOrEmpty(n.AsString())))
+                return null;
+            return decryptValue(n);
+        }
+        var isSealed = ev == "document_sealed";
+
         return new Change(
             Id: obj.Get("id").AsString(),
             Event: ev,
@@ -581,7 +596,7 @@ public sealed record Change(
             // challenge_id/completed_at stay in Raw. The poll is the record (spec §3).
             Status: (ev == "document_status_changed" || ev == "2fa_challenge_completed") ? obj.Get("status").AsString() : null,
             Action: ev == "document_status_changed" ? obj.Get("action").AsString() : null,
-            Note: ev == "document_status_changed" ? obj.Get("note").AsString() : null,
+            Note: OpenStatusText("note"),
             Method: ev == "document_status_changed" ? obj.Get("method").AsString() : null,
             ContentSha256: ev == "document_status_changed" ? obj.Get("content_sha256").AsString() : null,
             SignedAt: ev == "document_status_changed" ? obj.Get("signed_at").AsString() : null,
@@ -603,10 +618,10 @@ public sealed record Change(
             MessageId = isMessage ? obj.Get("message_id").AsString() : null,
             PersonPublicKey = isMessage ? obj.Get("person_public_key").AsString() : null,
             MessageBody = messageBody,
-            SealedAt = ev == "document_status_changed" ? ModelCoerce.ParseIsoDt(obj.Get("sealed_at").AsString()) : null,
-            PlainSha256 = ev == "document_status_changed" ? obj.Get("plain_sha256").AsString() : null,
-            SignerFirstName = ev == "document_status_changed" ? obj.Get("signer_first_name").AsString() : null,
-            SignerLastName = ev == "document_status_changed" ? obj.Get("signer_last_name").AsString() : null,
+            SealedAt = isSealed ? ModelCoerce.ParseIsoDt(obj.Get("sealed_at").AsString()) : null,
+            PlainSha256 = isSealed ? obj.Get("plain_sha256").AsString() : null,
+            SignerFirstName = OpenStatusText("signer_first_name"),
+            SignerLastName = OpenStatusText("signer_last_name"),
             SignerNameVerified = ev == "document_status_changed" ? ModelCoerce.CoerceBool(obj.Get("signer_name_verified")) : null,
         };
     }

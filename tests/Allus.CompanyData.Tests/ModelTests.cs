@@ -349,6 +349,8 @@ public class ModelTests
     public void ChangeDocumentStatusChangedCarriesAction()
     {
         using var key = Vector.PrivateKey();
+        using var pub = RSA.Create();
+        pub.ImportSubjectPublicKeyInfo(key.ExportSubjectPublicKeyInfo(), out _);
         var body = Obj(new()
         {
             ["changes"] = Node.List(new List<Node>
@@ -357,24 +359,50 @@ public class ModelTests
                 {
                     ["id"] = S("chg-sign"), ["event"] = S("document_status_changed"),
                     ["person_user_id"] = S("u-2"), ["action"] = S("signed"),
+                    ["signer_first_name"] = S(Crypto.EncryptForPublicKey("Ada", pub).ToJsonString()),
+                    ["signer_last_name"] = S(Crypto.EncryptForPublicKey("Lovelace", pub).ToJsonString()),
+                    ["signer_name_verified"] = S(true), ["note"] = Node.Null,
                     ["document_id"] = S("doc-7"), ["status"] = S("active"),
                     ["at"] = S("2026-06-22T10:00:00Z"),
                 }),
+                Obj(new()
+                {
+                    ["id"] = S("chg-seal"), ["event"] = S("document_sealed"),
+                    ["person_user_id"] = S("u-2"), ["document_id"] = S("doc-7"),
+                    ["sealed_at"] = S("2026-06-22T10:00:05Z"), ["plain_sha256"] = S("ab12"),
+                    ["at"] = S("2026-06-22T10:00:05Z"),
+                }),
             }),
         });
-        var chg = Change.ListFromApi(body, _ => null, FieldValidationTests.Registry, DecryptWith(key))[0];
+        var changes = Change.ListFromApi(body, _ => null, FieldValidationTests.Registry, DecryptWith(key));
+        var chg = changes[0];
         Assert.Equal("document_status_changed", chg.Event);
         Assert.Equal("signed", chg.Action);
         Assert.Equal("doc-7", chg.DocumentId);
         Assert.Equal("active", chg.Status);
         Assert.Null(chg.Slug);
         Assert.Null(chg.Note);  // no note on a signed event
+        Assert.Equal("Ada", chg.SignerFirstName);
+        Assert.Equal("Lovelace", chg.SignerLastName);
+        Assert.True(chg.SignerNameVerified);
+        Assert.Null(chg.SealedAt);
+        Assert.Null(chg.PlainSha256);
+
+        var sealedChg = changes[1];
+        Assert.Equal("document_sealed", sealedChg.Event);
+        Assert.Equal("doc-7", sealedChg.DocumentId);
+        Assert.Equal(DateTimeOffset.Parse("2026-06-22T10:00:05Z"), sealedChg.SealedAt);
+        Assert.Equal("ab12", sealedChg.PlainSha256);
+        Assert.Null(sealedChg.SignerFirstName);
+        Assert.Null(sealedChg.Status);
     }
 
     [Fact]
     public void ChangeDocumentStatusChangedCarriesCancellationNote()
     {
         using var key = Vector.PrivateKey();
+        using var pub = RSA.Create();
+        pub.ImportSubjectPublicKeyInfo(key.ExportSubjectPublicKeyInfo(), out _);
         var body = Obj(new()
         {
             ["changes"] = Node.List(new List<Node>
@@ -383,7 +411,7 @@ public class ModelTests
                 {
                     ["id"] = S("chg-cancel"), ["event"] = S("document_status_changed"),
                     ["person_user_id"] = S("u-3"), ["action"] = S("cancelled"),
-                    ["note"] = S("Too expensive"),
+                    ["note"] = S(Crypto.EncryptForPublicKey("Too expensive", pub).ToJsonString()),
                     ["document_id"] = S("doc-5"), ["status"] = S("ended"),
                     ["at"] = S("2026-06-22T10:00:00Z"),
                 }),

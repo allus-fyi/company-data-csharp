@@ -230,6 +230,8 @@ public sealed record Change(
 | `field_deleted` | `Slug`, no value |
 | `consent_accepted` / `consent_declined` | `Slug` |
 | `message_received` | `ConnectionId`, `MessageId`, `PersonPublicKey` + `MessageBody` (the DECRYPTED message text); no slot. Person→company only — a broadcast raises no event |
+| `document_status_changed` | `DocumentId`, `Status`, `Action`; a signature adds `Method`, `ContentSha256`, `SignedAt`, `SignerFirstName`, `SignerLastName`, `SignerNameVerified`; a cancellation adds `Note` and `CancelEffectiveDate`. The signer names and the note arrive encrypted to the service key; the SDK decrypts them |
+| `document_sealed` | `DocumentId`, `SealedAt`, `PlainSha256` — the platform sealed a file document (never a JSON contract) |
 
 The event's ciphertext is carried under `body`. It is never `value`: on every other
 event `value` means field ciphertext, and a message body is not one.
