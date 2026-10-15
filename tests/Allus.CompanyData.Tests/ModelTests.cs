@@ -272,7 +272,6 @@ public class ModelTests
     {
         var body = Node.FromJsonString(JsonSerializer.Serialize(new
         {
-            total = 2,
             items = new object[]
             {
                 new { type = "email", message = "stale-queue alert", metadata = new { days = 3 }, at = "2026-06-17T06:00:00Z" },

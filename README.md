@@ -195,18 +195,20 @@ foreach (var f in await client.RequestFieldsAsync())
 }
 ```
 
-### `ConnectionsAsync(limit, offset)`
+### `ConnectionsAsync(limit)`
 
 ```csharp
-IAsyncEnumerable<Connection> ConnectionsAsync(int limit = 100, int offset = 0, CancellationToken ct = default)
+IAsyncEnumerable<Connection> ConnectionsAsync(int limit = 100, CancellationToken ct = default)
 ```
 
-A **lazy async stream** that auto-pages `GET /api/company-data/connections?limit&offset`,
-honoring the API `total` (and stopping on a short page), and yields one typed
-`Connection` at a time (bounded memory for a large book). Each `conn.Values[slug]`
-is already decrypted (or a lazy binary handle).
+A **lazy async stream** that pages `GET /api/company-data/connections`, newest connection
+first, following the list's cursor — each page's `next` marker is sent back as `after`
+until a page answers none — and yields one typed `Connection` at a time (bounded memory
+for a large book). A page is fetched only once the previous one has been consumed; a page
+costs the platform the same at any depth, and the list carries no total. Each
+`conn.Values[slug]` is already decrypted (or a lazy binary handle).
 
-* **Params:** `limit` — page size (default 100); `offset` — starting offset.
+* **Params:** `limit` — page size (default 100, max 500).
 * **Throws:** `AuthException`, `ApiException`, `RateLimitException` (after the iterator's bounded internal backoff — see [Rate limits](#rate-limits)).
 * **A value the service key cannot open never ends the listing.** It is returned in its own place with `ValueObj` `null` and `Unreadable` `true` (see [`Value`](#value)), and every other value and connection is returned as usual. When every value of every connection reads `Unreadable`, check the configured `service_private_key`.
 
@@ -252,20 +254,23 @@ End one of this service's connections (`DELETE /api/company-data/connections/{id
 await client.DeleteConnectionAsync(connId);
 ```
 
-### `LogsAsync(limit, offset)`
+### `LogsAsync(limit)`
 
 ```csharp
-Task<IReadOnlyList<LogEntry>> LogsAsync(int limit = 50, int offset = 0, CancellationToken ct = default)
+IAsyncEnumerable<LogEntry> LogsAsync(int limit = 50, CancellationToken ct = default)
 ```
 
-The service's activity log (`GET /api/company-data/logs?limit&offset`) — **ops
-events only** (email / purge / webhook), never person field data.
+The service's activity log, newest first (`GET /api/company-data/logs`) — **ops
+events only** (email / purge / webhook), never person field data. A **lazy async
+stream** following the list's cursor (`next` sent back as `after`) until a page
+answers none.
 
-* **Returns:** `IReadOnlyList<LogEntry>` — each `LogEntry(Type, Message, Metadata, At)`.
+* **Params:** `limit` — page size (default 50, max 200).
+* **Returns:** `IAsyncEnumerable<LogEntry>` — each `LogEntry(Type, Message, Metadata, At)`.
 * **Throws:** `AuthException`, `ApiException`, `RateLimitException`.
 
 ```csharp
-foreach (var entry in await client.LogsAsync(limit: 20))
+await foreach (var entry in client.LogsAsync(limit: 20))
     Console.WriteLine($"{entry.At} {entry.Type} {entry.Message}");
 ```
 

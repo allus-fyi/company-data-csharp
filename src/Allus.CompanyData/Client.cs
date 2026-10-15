@@ -4,9 +4,9 @@
 // nowhere else), then call:
 //
 //   client.RequestFieldsAsync()              -> cached IReadOnlyList<RequestField>  (slug -> meta)
-//   client.ConnectionsAsync(limit, offset)   -> IAsyncEnumerable<Connection> (auto-paged, honors total)
+//   client.ConnectionsAsync(limit)           -> IAsyncEnumerable<Connection> (auto-paged)
 //   client.ConnectionAsync(id)               -> one Connection
-//   client.LogsAsync(limit, offset)          -> IReadOnlyList<LogEntry>
+//   client.LogsAsync(limit)                  -> IAsyncEnumerable<LogEntry> (auto-paged)
 //   client.ProcessChangesAsync(handler)      -> the crash-safe pump
 //   client.DrainBatchAsync(max)              -> raw unbuffered drain (advanced)
 //   client.DeadLetters() / client.RetryDeadLettersAsync(handler)
@@ -58,6 +58,9 @@ public sealed class Client : IDisposable
 
     // Default page size for the connections iterator (heavily rate-limited).
     private const int DefaultConnPage = 100;
+
+    // Page size FlowRunsAsync reads the run list with (the list's maximum).
+    private const int FlowRunPage = 500;
 
     // Bounded extra backoff for the connections iterator on a surfaced 429.
     private const int ConnMax429Backoffs = 5;
@@ -393,10 +396,11 @@ public sealed class Client : IDisposable
 
     /// <summary>
     /// A lazy async stream paging the list endpoint, yielding one <see cref="Connection"/> at a
-    /// time. <paramref name="limit"/> is the page size; <paramref name="offset"/> the starting
-    /// offset. The stream auto-pages <c>GET /api/company-data/connections?limit&amp;offset</c>,
-    /// honoring the API <c>total</c> (and stopping on a short page), and yields typed connections
-    /// (each <c>Values[slug]</c> already decrypted / a lazy binary handle) — bounded memory.
+    /// time. <paramref name="limit"/> is the page size. The stream pages
+    /// <c>GET /api/company-data/connections</c> with its cursor — each page's <c>next</c> marker is
+    /// sent back as <c>after</c> until a page answers none — and yields typed connections (each
+    /// <c>Values[slug]</c> already decrypted / a lazy binary handle) — bounded memory. A page is
+    /// fetched only once the previous one has been consumed.
     ///
     /// The connections endpoints are HEAVILY rate-limited: use this for the initial
     /// full sync + occasional reconciliation, never as a poll substitute for the changes feed. On a
@@ -405,26 +409,16 @@ public sealed class Client : IDisposable
     /// </summary>
     public async IAsyncEnumerable<Connection> ConnectionsAsync(
         int limit = DefaultConnPage,
-        int offset = 0,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         var page = Math.Max(1, limit);
-        var cur = Math.Max(0, offset);
         await PrepareTypingAsync(ct).ConfigureAwait(false); // the catalog and its registry, before typing
 
-        var yielded = 0;
-        long? total = null;
+        string? after = null;
         while (true)
         {
-            var body = await GetConnectionsPageAsync(page, cur, ct).ConfigureAwait(false);
-            if (total is null)
-            {
-                var t = body.Get("total").AsString();
-                if (long.TryParse(t, out var parsed)) total = parsed;
-            }
-            var items = ListItems(body);
-            if (items.Count == 0) yield break;
-            foreach (var obj in items)
+            var body = await GetConnectionsPageAsync(page, after, ct).ConfigureAwait(false);
+            foreach (var obj in ListItems(body))
             {
                 if (obj.Kind != NodeKind.Object) continue;
                 yield return Connection.FromApi(
@@ -434,34 +428,29 @@ public sealed class Client : IDisposable
                     DecryptValueImpl,
                     (url, c) => BinaryFetchImpl(url, c),
                     identity: obj); // the list row carries identity AND the values map
-                yielded++;
             }
-            // Stop when we've reached the reported total, or on a short page.
-            if (total is { } tot && yielded >= tot) yield break;
-            if (items.Count < page) yield break;
-            cur += page;
+            after = NextMarker(body);
+            if (after is null) yield break;
         }
     }
 
-    private async Task<Node> GetConnectionsPageAsync(int page, int offset, CancellationToken ct)
+    private async Task<Node> GetConnectionsPageAsync(int page, string? after, CancellationToken ct)
     {
+        var query = new Dictionary<string, string> { ["limit"] = page.ToString() };
+        if (after is not null) query["after"] = after;
         var attempts = 0;
         while (true)
         {
             try
             {
-                return await _http.GetAsync(ConnectionsPath, new Dictionary<string, string>
-                {
-                    ["limit"] = page.ToString(),
-                    ["offset"] = offset.ToString(),
-                }, ct).ConfigureAwait(false);
+                return await _http.GetAsync(ConnectionsPath, query, ct).ConfigureAwait(false);
             }
             catch (RateLimitException ex)
             {
                 attempts++;
                 if (attempts > ConnMax429Backoffs) throw;
                 var delay = ConnBackoff(ex.RetryAfter, attempts);
-                _log?.Log($"connections rate-limited (offset={offset}); backoff {delay:F1}s (attempt {attempts})");
+                _log?.Log($"connections rate-limited; backoff {delay:F1}s (attempt {attempts})");
                 if (delay > 0) await _sleep(delay, ct).ConfigureAwait(false);
             }
         }
@@ -501,17 +490,29 @@ public sealed class Client : IDisposable
     // ── logs (moderate rate-limit) ──────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The service's activity log → <c>IReadOnlyList&lt;LogEntry&gt;</c>.
-    /// <c>GET /api/company-data/logs?limit&amp;offset</c>. Ops events only — never person field data.
+    /// The service's activity log, newest first, as a lazy stream. It pages
+    /// <c>GET /api/company-data/logs</c> with its cursor: <paramref name="limit"/> is the page size
+    /// (1–200), and each page's <c>next</c> marker is sent back as <c>after</c> until a page answers
+    /// none. Ops events only — never person field data.
     /// </summary>
-    public async Task<IReadOnlyList<LogEntry>> LogsAsync(int limit = 50, int offset = 0, CancellationToken ct = default)
+    public async IAsyncEnumerable<LogEntry> LogsAsync(
+        int limit = 50,
+        [EnumeratorCancellation] CancellationToken ct = default)
     {
-        var body = await _http.GetAsync(LogsPath, new Dictionary<string, string>
+        var page = Math.Min(200, Math.Max(1, limit));
+        string? after = null;
+        while (true)
         {
-            ["limit"] = Math.Max(1, limit).ToString(),
-            ["offset"] = Math.Max(0, offset).ToString(),
-        }, ct).ConfigureAwait(false);
-        return LogEntry.ListFromApi(body);
+            var query = new Dictionary<string, string> { ["limit"] = page.ToString() };
+            if (after is not null) query["after"] = after;
+            var body = await _http.GetAsync(LogsPath, query, ct).ConfigureAwait(false);
+            foreach (var entry in LogEntry.ListFromApi(body))
+            {
+                yield return entry;
+            }
+            after = NextMarker(body);
+            if (after is null) yield break;
+        }
     }
 
     // ── changes feed — the crash-safe pump ──────────────────────────────────────────────────────
@@ -894,9 +895,8 @@ public sealed class Client : IDisposable
             {
                 yield return doc;
             }
-            var next = body.Get("next").AsString();
-            if (string.IsNullOrEmpty(next)) yield break;
-            after = next;
+            after = NextMarker(body);
+            if (after is null) yield break;
         }
     }
 
@@ -1365,16 +1365,25 @@ public sealed class Client : IDisposable
     }
 
     /// <summary>
-    /// List this service's runs. An empty/null <paramref name="status"/> defaults to the actionable
-    /// "awaiting_company" queue; pass "*" for the unfiltered list, or any status filter.
+    /// List this service's runs, newest first. An empty/null <paramref name="status"/> defaults to the actionable
+    /// "awaiting_company" queue; pass "*" for the unfiltered list, or any status filter. Every page of
+    /// <c>GET /api/company-data/flow-runs</c> is read, following its cursor (<c>next</c> sent back as
+    /// <c>after</c>) until a page answers none.
     /// </summary>
     public async Task<IReadOnlyList<FlowRun>> FlowRunsAsync(string? status = "awaiting_company", CancellationToken ct = default)
     {
-        Dictionary<string, string>? query = null;
-        if (!string.IsNullOrEmpty(status) && status != "*")
-            query = new Dictionary<string, string> { ["status"] = status! };
-        var body = await _http.GetAsync(FlowRunsPath, query, ct).ConfigureAwait(false);
-        return ListItems(body).Select(FlowRun.FromApi).ToList();
+        var runs = new List<FlowRun>();
+        string? after = null;
+        while (true)
+        {
+            var query = new Dictionary<string, string> { ["limit"] = FlowRunPage.ToString() };
+            if (!string.IsNullOrEmpty(status) && status != "*") query["status"] = status!;
+            if (after is not null) query["after"] = after;
+            var body = await _http.GetAsync(FlowRunsPath, query, ct).ConfigureAwait(false);
+            runs.AddRange(ListItems(body).Select(FlowRun.FromApi));
+            after = NextMarker(body);
+            if (after is null) return runs;
+        }
     }
 
     /// <summary>Fetch one run by id → <see cref="FlowRun"/>.</summary>
@@ -1730,6 +1739,17 @@ public sealed class Client : IDisposable
             // A bad passphrase / malformed PEM is a configuration problem (fail fast).
             throw new ConfigException($"could not load service private key: {ex.Message}", ex);
         }
+    }
+
+    /// <summary>
+    /// A cursor-paged list response's <c>next</c> marker, or null on the last page. An empty string —
+    /// what an XML response carries for a null <c>next</c> — is the last page too.
+    /// </summary>
+    private static string? NextMarker(Node body)
+    {
+        if (body.Kind != NodeKind.Object) return null;
+        var next = body.Get("next").AsString();
+        return string.IsNullOrEmpty(next) ? null : next;
     }
 
     private static List<Node> ListItems(Node body)

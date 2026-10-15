@@ -90,7 +90,6 @@ public sealed class ClientTests : IDisposable
         var addrWrapper = EncryptForKey(JsonSerializer.Serialize(new { city = "Utrecht", country = "NL" }));
         var page1 = new
         {
-            total = 1,
             items = new object[]
             {
                 new
@@ -142,8 +141,8 @@ public sealed class ClientTests : IDisposable
         object Item(int i) => new { connection_id = $"c{i}", user_id = $"p{i}", display_name = $"N{i}", values = new Dictionary<string, object>() };
         var pages = new[]
         {
-            new { total = 3, items = new[] { Item(1), Item(2) } }, // full page (==limit 2)
-            new { total = 3, items = new[] { Item(3) } },          // short page → stop
+            new { items = new[] { Item(1), Item(2) }, next = (string?)"m1" },
+            new { items = new[] { Item(3) }, next = (string?)null },
         };
         var i = 0;
         var (client, transport) = Make((url, q) =>
@@ -157,9 +156,10 @@ public sealed class ClientTests : IDisposable
             var ids = new List<string?>();
             await foreach (var c in client.ConnectionsAsync(limit: 2)) ids.Add(c.Id);
             Assert.Equal(new[] { "c1", "c2", "c3" }, ids);
-            var offsets = transport.Gets.Where(g => g.Url.EndsWith("/connections"))
-                .Select(g => g.Query!["offset"]).ToList();
-            Assert.Equal(new[] { "0", "2" }, offsets);
+            var connGets = transport.Gets.Where(g => g.Url.EndsWith("/connections")).ToList();
+            var afters = connGets.Select(g => g.Query!.TryGetValue("after", out var a) ? a : null).ToList();
+            Assert.Equal(new string?[] { null, "m1" }, afters);
+            Assert.All(connGets, g => Assert.False(g.Query!.ContainsKey("offset")));
         }
     }
 
@@ -170,7 +170,6 @@ public sealed class ClientTests : IDisposable
     {
         var page = new
         {
-            total = 1,
             items = new object[]
             {
                 new
@@ -214,7 +213,6 @@ public sealed class ClientTests : IDisposable
     {
         var page = new
         {
-            total = 1,
             items = new object[]
             {
                 new
@@ -261,7 +259,6 @@ public sealed class ClientTests : IDisposable
     {
         var page = new
         {
-            total = 1,
             items = new object[]
             {
                 new
@@ -334,28 +331,42 @@ public sealed class ClientTests : IDisposable
     [Fact]
     public async Task LogsDeserialize()
     {
-        var body = new
+        var pages = new object[]
         {
-            total = 2,
-            items = new object[]
+            new
             {
-                new { type = "email", message = "stale-queue alert", metadata = new { days = 3 }, created_at = "2026-06-17T06:00:00Z" },
-                new { type = "purge", message = "purged 4", metadata = new { count = 4 }, created_at = "2026-06-17T07:00:00Z" },
+                items = new object[]
+                {
+                    new { type = "email", message = "stale-queue alert", metadata = new { days = 3 }, created_at = "2026-06-17T06:00:00Z" },
+                },
+                next = "m1",
+            },
+            new
+            {
+                items = new object[]
+                {
+                    new { type = "purge", message = "purged 4", metadata = new { count = 4 }, created_at = "2026-06-17T07:00:00Z" },
+                },
+                next = (string?)null,
             },
         };
+        var i = 0;
         var (client, transport) = Make((url, q) =>
         {
-            if (url.EndsWith("/logs")) return Resp.Json(200, body);
+            if (url.EndsWith("/logs")) return Resp.Json(200, pages[i++]);
             throw new Xunit.Sdk.XunitException("unexpected GET " + url);
         });
         using (client)
         {
-            var logs = await client.LogsAsync(limit: 50);
+            var logs = new List<LogEntry>();
+            await foreach (var e in client.LogsAsync(limit: 50)) logs.Add(e);
             Assert.Equal(2, logs.Count);
             Assert.Equal("email", logs[0].Type);
             var meta = Assert.IsAssignableFrom<IDictionary<string, object?>>(logs[0].Metadata);
             Assert.Equal(3L, meta["days"]);
             Assert.Equal("50", transport.Gets[0].Query!["limit"]);
+            Assert.False(transport.Gets[0].Query!.ContainsKey("after"));
+            Assert.Equal("m1", transport.Gets[1].Query!["after"]);
         }
     }
 

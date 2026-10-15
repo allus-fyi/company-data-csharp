@@ -164,17 +164,21 @@ public sealed class FlowRunTests : IDisposable
     [Fact]
     public async Task FlowRunsDefaultAwaitingCompany()
     {
+        var afters = new List<string?>();
         var client = MakeRwClient((url, q) =>
         {
             Assert.EndsWith("/company-data/flow-runs", url);
             Assert.Equal("awaiting_company", q!["status"]);
-            return Resp.Json(200, new { total = 1, items = new[] { RunObj() } });
+            var after = q.TryGetValue("after", out var a) ? a : null;
+            afters.Add(after);
+            return Resp.Json(200, new { items = new[] { RunObj() }, next = after is null ? "m1" : null });
         }, (m, u, b) => Resp.Json(200, new { }));
         using (client)
         {
             var runs = await client.FlowRunsAsync();
-            Assert.Single(runs);
+            Assert.Equal(2, runs.Count);
             Assert.Equal("awaiting_company", runs[0].Status);
+            Assert.Equal(new string?[] { null, "m1" }, afters);
         }
     }
 
