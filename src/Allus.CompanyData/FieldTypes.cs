@@ -124,11 +124,16 @@ public sealed class FieldTypeRegistry
         IReadOnlyList<string>? Options);
 
     /// <summary>A row with every inherited column filled in, plus the validations root-first.</summary>
+    /// <remarks>
+    /// <c>SystemOnly</c> marks a type written by the platform alone. It is read off the type's own
+    /// row, never inherited, and is false for a type the registry does not carry.
+    /// </remarks>
     public sealed record Resolved(
         string Type,
         string? Parent,
         string Label,
         bool IsSystem,
+        bool SystemOnly,
         bool Known,
         string? Input,
         string? Lane,
@@ -147,7 +152,8 @@ public sealed class FieldTypeRegistry
         IReadOnlyList<string>? Options,
         IReadOnlyList<SubFieldEntry>? Fields,
         string? Validation,
-        bool IsSystem);
+        bool IsSystem,
+        bool SystemOnly);
 
     private readonly List<string> _order = new();
     private readonly Dictionary<string, Row> _byType = new(StringComparer.Ordinal);
@@ -182,7 +188,8 @@ public sealed class FieldTypeRegistry
         ReadOptions(raw.Get("options")),
         ReadFields(raw.Get("fields")),
         raw.Get("validation").AsString(),
-        ModelCoerce.CoerceBool(raw.Get("is_system")) ?? false);
+        ModelCoerce.CoerceBool(raw.Get("is_system")) ?? false,
+        ModelCoerce.CoerceBool(raw.Get("system_only")) ?? false);
 
     private static IReadOnlyList<string>? ReadOptions(Node node)
     {
@@ -231,7 +238,7 @@ public sealed class FieldTypeRegistry
     private Resolved ResolveIn(string type)
     {
         if (!_byType.TryGetValue(type, out var row))
-            return new Resolved(type, null, type, false, false, null, null, null, null, null, Array.Empty<string>());
+            return new Resolved(type, null, type, false, false, false, null, null, null, null, null, Array.Empty<string>());
 
         // Walk to the root collecting the chain, then fill downward: the nearest ancestor that sets
         // an inherited column wins, and the validations come out root-first.
@@ -264,6 +271,7 @@ public sealed class FieldTypeRegistry
             row.Parent,
             string.IsNullOrEmpty(row.Label) ? type : row.Label!,
             row.IsSystem,
+            row.SystemOnly,
             true,
             input,
             lane,
@@ -360,12 +368,19 @@ public sealed class FieldTypeRegistry
         return null;
     }
 
-    /// <summary>The types a contact field, a service request row or an admin field may declare.</summary>
-    public IReadOnlyList<string> RequestableTypes() => _order.Where(t => !IsOptionLessChoice(t)).ToList();
+    /// <summary>
+    /// The types a contact field, a service request row or an admin field may declare: every type
+    /// except an option-less choice type and a system-only type.
+    /// </summary>
+    public IReadOnlyList<string> RequestableTypes() =>
+        _order.Where(t => !IsOptionLessChoice(t) && !Resolve(t).SystemOnly).ToList();
 
-    /// <summary>The requestable set plus the option-less choice types a flow element supplies options for.</summary>
+    /// <summary>
+    /// The requestable set plus the option-less choice types a flow element supplies options for.
+    /// A system-only type is in neither half.
+    /// </summary>
     public IReadOnlyList<string> FlowTypes() =>
-        RequestableTypes().Concat(_order.Where(IsOptionLessChoice)).ToList();
+        RequestableTypes().Concat(_order.Where(t => IsOptionLessChoice(t) && !Resolve(t).SystemOnly)).ToList();
 
     /// <summary>
     /// The types an OAuth claim may declare: the requestable set on the <c>inline</c> lane. A file

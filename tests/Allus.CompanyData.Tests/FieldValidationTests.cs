@@ -78,6 +78,7 @@ public sealed class FieldValidationTests
             Assert.Equal(NullableString(want, "parent"), got.Parent);
             Assert.Equal(want.GetProperty("label").GetString(), got.Label);
             Assert.Equal(want.GetProperty("is_system").GetBoolean(), got.IsSystem);
+            Assert.Equal(want.GetProperty("system_only").GetBoolean(), got.SystemOnly);
             Assert.Equal(want.GetProperty("known").GetBoolean(), got.Known);
             Assert.Equal(NullableString(want, "input"), got.Input);
             Assert.Equal(NullableString(want, "lane"), got.Lane);
